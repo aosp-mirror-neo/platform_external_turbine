@@ -181,7 +181,10 @@ public final class Binder {
             log);
     tenv =
         disambiguateTypeAnnotations(
-            syms, tenv, CompoundEnv.<ClassSymbol, TypeBoundClass>of(classPathEnv).append(tenv));
+            syms,
+            tenv,
+            CompoundEnv.<ClassSymbol, TypeBoundClass>of(classPathEnv).append(tenv),
+            log);
     tenv =
         canonicalizeTypes(
             syms, tenv, CompoundEnv.<ClassSymbol, TypeBoundClass>of(classPathEnv).append(tenv));
@@ -453,7 +456,7 @@ public final class Binder {
         if (((Type.ClassTy) field.type()).sym().equals(ClassSymbol.STRING)) {
           break;
         }
-        // fall through
+      // fall through
       default:
         return false;
     }
@@ -467,11 +470,12 @@ public final class Binder {
   private static Env<ClassSymbol, SourceTypeBoundClass> disambiguateTypeAnnotations(
       ImmutableSet<ClassSymbol> syms,
       Env<ClassSymbol, SourceTypeBoundClass> stenv,
-      Env<ClassSymbol, TypeBoundClass> tenv) {
+      Env<ClassSymbol, TypeBoundClass> tenv,
+      TurbineLog log) {
     SimpleEnv.Builder<ClassSymbol, SourceTypeBoundClass> builder = SimpleEnv.builder();
     for (ClassSymbol sym : syms) {
       SourceTypeBoundClass base = stenv.getNonNull(sym);
-      builder.put(sym, DisambiguateTypeAnnotations.bind(base, tenv));
+      builder.put(sym, DisambiguateTypeAnnotations.bind(base, tenv, log));
     }
     return builder.build();
   }

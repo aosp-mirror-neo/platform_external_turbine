@@ -54,19 +54,13 @@ import org.jspecify.annotations.Nullable;
 class TurbineAnnotationMirror implements TurbineAnnotationValueMirror, AnnotationMirror {
 
   static TurbineAnnotationValueMirror annotationValue(ModelFactory factory, Const value) {
-    switch (value.kind()) {
-      case ARRAY:
-        return new TurbineArrayConstant(factory, (ArrayInitValue) value);
-      case PRIMITIVE:
-        return new TurbinePrimitiveConstant((Const.Value) value);
-      case CLASS_LITERAL:
-        return new TurbineClassConstant(factory, (TurbineClassValue) value);
-      case ENUM_CONSTANT:
-        return new TurbineEnumConstant(factory, (EnumConstantValue) value);
-      case ANNOTATION:
-        return new TurbineAnnotationMirror(factory, (TurbineAnnotationValue) value);
-    }
-    throw new AssertionError(value.kind());
+    return switch (value.kind()) {
+      case ARRAY -> new TurbineArrayConstant(factory, (ArrayInitValue) value);
+      case PRIMITIVE -> new TurbinePrimitiveConstant((Const.Value) value);
+      case CLASS_LITERAL -> new TurbineClassConstant(factory, (TurbineClassValue) value);
+      case ENUM_CONSTANT -> new TurbineEnumConstant(factory, (EnumConstantValue) value);
+      case ANNOTATION -> new TurbineAnnotationMirror(factory, (TurbineAnnotationValue) value);
+    };
   }
 
   static TurbineAnnotationMirror create(ModelFactory factory, AnnoInfo anno) {
@@ -159,8 +153,8 @@ class TurbineAnnotationMirror implements TurbineAnnotationValueMirror, Annotatio
 
   @Override
   public boolean equals(@Nullable Object obj) {
-    return obj instanceof TurbineAnnotationMirror
-        && anno.equals(((TurbineAnnotationMirror) obj).anno);
+    return obj instanceof TurbineAnnotationMirror turbineAnnotationMirror
+        && anno.equals(turbineAnnotationMirror.anno);
   }
 
   @Override
@@ -345,8 +339,8 @@ class TurbineAnnotationMirror implements TurbineAnnotationValueMirror, Annotatio
 
     @Override
     public boolean equals(@Nullable Object obj) {
-      return obj instanceof TurbinePrimitiveConstant
-          && value.equals(((TurbinePrimitiveConstant) obj).value);
+      return obj instanceof TurbinePrimitiveConstant turbinePrimitiveConstant
+          && value.equals(turbinePrimitiveConstant.value);
     }
 
     @Override

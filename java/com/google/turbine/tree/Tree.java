@@ -24,6 +24,7 @@ import com.google.errorprone.annotations.Immutable;
 import com.google.turbine.diag.SourceFile;
 import com.google.turbine.model.Const;
 import com.google.turbine.model.TurbineConstantTypeKind;
+import com.google.turbine.model.TurbineJavadoc;
 import com.google.turbine.model.TurbineTyKind;
 import java.util.ArrayDeque;
 import java.util.Deque;
@@ -475,7 +476,7 @@ public abstract class Tree {
     }
   }
 
-  /** A JLS 6.5.6.1 simple name that refers to a JSL 4.12.4 constant variable. */
+  /** A JLS 4.12.4 constant variable. */
   public static class ConstVarName extends Expression {
     private final ImmutableList<Ident> name;
 
@@ -720,7 +721,7 @@ public abstract class Tree {
     private final Tree ty;
     private final Ident name;
     private final Optional<Expression> init;
-    private final @Nullable String javadoc;
+    private final @Nullable TurbineJavadoc javadoc;
 
     public VarDecl(
         int position,
@@ -729,7 +730,7 @@ public abstract class Tree {
         Tree ty,
         Ident name,
         Optional<Expression> init,
-        @Nullable String javadoc) {
+        @Nullable TurbineJavadoc javadoc) {
       super(position);
       this.mods = ImmutableSet.copyOf(mods);
       this.annos = annos;
@@ -774,7 +775,7 @@ public abstract class Tree {
      * A javadoc comment, excluding the opening and closing delimiters but including all interior
      * characters and whitespace.
      */
-    public @Nullable String javadoc() {
+    public @Nullable TurbineJavadoc javadoc() {
       return javadoc;
     }
   }
@@ -789,7 +790,7 @@ public abstract class Tree {
     private final ImmutableList<VarDecl> params;
     private final ImmutableList<ClassTy> exntys;
     private final Optional<Tree> defaultValue;
-    private final String javadoc;
+    private final TurbineJavadoc javadoc;
 
     public MethDecl(
         int position,
@@ -801,7 +802,7 @@ public abstract class Tree {
         ImmutableList<VarDecl> params,
         ImmutableList<ClassTy> exntys,
         Optional<Tree> defaultValue,
-        String javadoc) {
+        TurbineJavadoc javadoc) {
       super(position);
       this.mods = ImmutableSet.copyOf(mods);
       this.annos = annos;
@@ -861,7 +862,7 @@ public abstract class Tree {
      * A javadoc comment, excluding the opening and closing delimiters but including all interior
      * characters and whitespace.
      */
-    public String javadoc() {
+    public TurbineJavadoc javadoc() {
       return javadoc;
     }
   }
@@ -939,7 +940,7 @@ public abstract class Tree {
     private final ImmutableList<Tree> members;
     private final ImmutableList<VarDecl> components;
     private final TurbineTyKind tykind;
-    private final @Nullable String javadoc;
+    private final @Nullable TurbineJavadoc javadoc;
 
     public TyDecl(
         int position,
@@ -953,7 +954,7 @@ public abstract class Tree {
         ImmutableList<Tree> members,
         ImmutableList<VarDecl> components,
         TurbineTyKind tykind,
-        @Nullable String javadoc) {
+        @Nullable TurbineJavadoc javadoc) {
       super(position);
       this.mods = ImmutableSet.copyOf(mods);
       this.annos = annos;
@@ -1023,7 +1024,7 @@ public abstract class Tree {
      * A javadoc comment, excluding the opening and closing delimiters but including all interior
      * characters and whitespace.
      */
-    public @Nullable String javadoc() {
+    public @Nullable TurbineJavadoc javadoc() {
       return javadoc;
     }
   }
@@ -1070,11 +1071,17 @@ public abstract class Tree {
   public static class PkgDecl extends Tree {
     private final ImmutableList<Ident> name;
     private final ImmutableList<Anno> annos;
+    private final TurbineJavadoc javadoc;
 
-    public PkgDecl(int position, ImmutableList<Ident> name, ImmutableList<Anno> annos) {
+    public PkgDecl(
+        int position,
+        ImmutableList<Ident> name,
+        ImmutableList<Anno> annos,
+        TurbineJavadoc javadoc) {
       super(position);
       this.name = name;
       this.annos = annos;
+      this.javadoc = javadoc;
     }
 
     @Override
@@ -1094,6 +1101,10 @@ public abstract class Tree {
 
     public ImmutableList<Anno> annos() {
       return annos;
+    }
+
+    public TurbineJavadoc javadoc() {
+      return javadoc;
     }
   }
 

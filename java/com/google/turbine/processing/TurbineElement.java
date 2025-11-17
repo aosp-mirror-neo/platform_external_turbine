@@ -45,6 +45,7 @@ import com.google.turbine.binder.sym.TyVarSymbol;
 import com.google.turbine.diag.TurbineError;
 import com.google.turbine.diag.TurbineError.ErrorKind;
 import com.google.turbine.model.TurbineFlag;
+import com.google.turbine.model.TurbineJavadoc;
 import com.google.turbine.tree.Tree.MethDecl;
 import com.google.turbine.tree.Tree.VarDecl;
 import com.google.turbine.type.AnnoInfo;
@@ -220,19 +221,15 @@ public abstract class TurbineElement implements Element {
               @Override
               public TypeMirror get() {
                 TypeBoundClass info = infoNonNull();
-                switch (info.kind()) {
-                  case CLASS:
-                  case ENUM:
-                  case RECORD:
+                return switch (info.kind()) {
+                  case CLASS, ENUM, RECORD -> {
                     if (info.superClassType() != null) {
-                      return factory.asTypeMirror(info.superClassType());
+                      yield factory.asTypeMirror(info.superClassType());
                     }
-                    return factory.noType();
-                  case INTERFACE:
-                  case ANNOTATION:
-                    return factory.noType();
-                }
-                throw new AssertionError(info.kind());
+                    yield factory.noType();
+                  }
+                  case INTERFACE, ANNOTATION -> factory.noType();
+                };
               }
             });
 
@@ -318,29 +315,14 @@ public abstract class TurbineElement implements Element {
     @Override
     public ElementKind getKind() {
       TypeBoundClass info = infoNonNull();
-      switch (info.kind()) {
-        case CLASS:
-          return ElementKind.CLASS;
-        case INTERFACE:
-          return ElementKind.INTERFACE;
-        case ENUM:
-          return ElementKind.ENUM;
-        case ANNOTATION:
-          return ElementKind.ANNOTATION_TYPE;
-        case RECORD:
-          return RECORD.get();
-      }
-      throw new AssertionError(info.kind());
+      return switch (info.kind()) {
+        case CLASS -> ElementKind.CLASS;
+        case INTERFACE -> ElementKind.INTERFACE;
+        case ENUM -> ElementKind.ENUM;
+        case ANNOTATION -> ElementKind.ANNOTATION_TYPE;
+        case RECORD -> ElementKind.RECORD;
+      };
     }
-
-    private static final Supplier<ElementKind> RECORD =
-        Suppliers.memoize(
-            new Supplier<ElementKind>() {
-              @Override
-              public ElementKind get() {
-                return ElementKind.valueOf("RECORD");
-              }
-            });
 
     @Override
     public Set<Modifier> getModifiers() {
@@ -439,17 +421,22 @@ public abstract class TurbineElement implements Element {
     }
 
     @Override
-    public String javadoc() {
+    public @Nullable String javadoc() {
       TypeBoundClass info = info();
-      if (!(info instanceof SourceTypeBoundClass)) {
+      if (!(info instanceof SourceTypeBoundClass sourceTypeBoundClass)) {
         return null;
       }
-      return ((SourceTypeBoundClass) info).decl().javadoc();
+      TurbineJavadoc javadoc = sourceTypeBoundClass.decl().javadoc();
+      if (javadoc == null) {
+        return null;
+      }
+      return javadoc.value();
     }
 
     @Override
     public boolean equals(@Nullable Object obj) {
-      return obj instanceof TurbineTypeElement && sym.equals(((TurbineTypeElement) obj).sym);
+      return obj instanceof TurbineTypeElement turbineTypeElement
+          && sym.equals(turbineTypeElement.sym);
     }
 
     @Override
@@ -579,8 +566,8 @@ public abstract class TurbineElement implements Element {
 
     @Override
     public boolean equals(@Nullable Object obj) {
-      return obj instanceof TurbineTypeParameterElement
-          && sym.equals(((TurbineTypeParameterElement) obj).sym);
+      return obj instanceof TurbineTypeParameterElement turbineTypeParameterElement
+          && sym.equals(turbineTypeParameterElement.sym);
     }
 
     private final TyVarSymbol sym;
@@ -699,9 +686,16 @@ public abstract class TurbineElement implements Element {
     }
 
     @Override
-    public String javadoc() {
+    public @Nullable String javadoc() {
       MethDecl decl = info().decl();
-      return decl != null ? decl.javadoc() : null;
+      if (decl == null) {
+        return null;
+      }
+      TurbineJavadoc javadoc = decl.javadoc();
+      if (javadoc == null) {
+        return null;
+      }
+      return javadoc.value();
     }
 
     @Override
@@ -711,8 +705,8 @@ public abstract class TurbineElement implements Element {
 
     @Override
     public boolean equals(@Nullable Object obj) {
-      return obj instanceof TurbineExecutableElement
-          && sym.equals(((TurbineExecutableElement) obj).sym);
+      return obj instanceof TurbineExecutableElement turbineExecutableElement
+          && sym.equals(turbineExecutableElement.sym);
     }
 
     @Override
@@ -859,7 +853,8 @@ public abstract class TurbineElement implements Element {
 
     @Override
     public boolean equals(@Nullable Object obj) {
-      return obj instanceof TurbineFieldElement && sym.equals(((TurbineFieldElement) obj).sym);
+      return obj instanceof TurbineFieldElement turbineFieldElement
+          && sym.equals(turbineFieldElement.sym);
     }
 
     @Override
@@ -875,9 +870,16 @@ public abstract class TurbineElement implements Element {
     }
 
     @Override
-    public String javadoc() {
+    public @Nullable String javadoc() {
       VarDecl decl = info().decl();
-      return decl != null ? decl.javadoc() : null;
+      if (decl == null) {
+        return null;
+      }
+      TurbineJavadoc javadoc = decl.javadoc();
+      if (javadoc == null) {
+        return null;
+      }
+      return javadoc.value();
     }
 
     private final Supplier<FieldInfo> info =
@@ -981,12 +983,10 @@ public abstract class TurbineElement implements Element {
     }
     if ((access & TurbineFlag.ACC_TRANSIENT) == TurbineFlag.ACC_TRANSIENT) {
       switch (modifierOwner) {
-        case METHOD:
-        case PARAMETER:
+        case METHOD, PARAMETER -> {
           // varargs and transient use the same bits
-          break;
-        default:
-          modifiers.add(Modifier.TRANSIENT);
+        }
+        default -> modifiers.add(Modifier.TRANSIENT);
       }
     }
     if ((access & TurbineFlag.ACC_VOLATILE) == TurbineFlag.ACC_VOLATILE) {
@@ -1086,8 +1086,16 @@ public abstract class TurbineElement implements Element {
     }
 
     @Override
-    public String javadoc() {
-      return null;
+    public @Nullable String javadoc() {
+      TypeBoundClass info = info();
+      if (!(info instanceof SourceTypeBoundClass sourceTypeBoundClass)) {
+        return null;
+      }
+      TurbineJavadoc javadoc = sourceTypeBoundClass.decl().javadoc();
+      if (javadoc == null) {
+        return null;
+      }
+      return javadoc.value();
     }
 
     @Override
@@ -1097,7 +1105,21 @@ public abstract class TurbineElement implements Element {
 
     @Override
     public boolean equals(@Nullable Object obj) {
-      return obj instanceof TurbinePackageElement && sym.equals(((TurbinePackageElement) obj).sym);
+      return obj instanceof TurbinePackageElement turbinePackageElement
+          && sym.equals(turbinePackageElement.sym);
+    }
+
+    private final Supplier<TypeBoundClass> info =
+        memoize(
+            new Supplier<TypeBoundClass>() {
+              @Override
+              public TypeBoundClass get() {
+                return factory.getSymbol(new ClassSymbol(sym.binaryName() + "/package-info"));
+              }
+            });
+
+    @Nullable TypeBoundClass info() {
+      return info.get();
     }
 
     private final Supplier<ImmutableList<AnnoInfo>> annos =
@@ -1105,8 +1127,7 @@ public abstract class TurbineElement implements Element {
             new Supplier<ImmutableList<AnnoInfo>>() {
               @Override
               public ImmutableList<AnnoInfo> get() {
-                TypeBoundClass info =
-                    factory.getSymbol(new ClassSymbol(sym.binaryName() + "/package-info"));
+                TypeBoundClass info = info();
                 return info != null ? info.annotations() : ImmutableList.of();
               }
             });
@@ -1142,8 +1163,8 @@ public abstract class TurbineElement implements Element {
 
     @Override
     public boolean equals(@Nullable Object obj) {
-      return obj instanceof TurbineParameterElement
-          && sym.equals(((TurbineParameterElement) obj).sym);
+      return obj instanceof TurbineParameterElement turbineParameterElement
+          && sym.equals(turbineParameterElement.sym);
     }
 
     private final ParamSymbol sym;
@@ -1247,8 +1268,8 @@ public abstract class TurbineElement implements Element {
 
     @Override
     public boolean equals(@Nullable Object obj) {
-      return obj instanceof TurbineRecordComponentElement
-          && sym.equals(((TurbineRecordComponentElement) obj).sym);
+      return obj instanceof TurbineRecordComponentElement turbineRecordComponentElement
+          && sym.equals(turbineRecordComponentElement.sym);
     }
 
     private final RecordComponentSymbol sym;

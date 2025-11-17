@@ -155,15 +155,13 @@ public final class Main {
     int transitiveClasspathLength = classPath.size();
     int reducedClasspathLength = classPath.size();
     switch (reducedClasspathMode) {
-      case NONE:
-        bound = bind(options, units, bootclasspath, classPath);
-        break;
-      case BAZEL_FALLBACK:
+      case NONE -> bound = bind(options, units, bootclasspath, classPath);
+      case BAZEL_FALLBACK -> {
         reducedClasspathLength = options.reducedClasspathLength();
         bound = bind(options, units, bootclasspath, classPath);
         transitiveClasspathFallback = true;
-        break;
-      case JAVABUILDER_REDUCED:
+      }
+      case JAVABUILDER_REDUCED -> {
         Collection<String> reducedClasspath =
             Dependencies.reduceClasspath(classPath, options.directJars(), options.depsArtifacts());
         reducedClasspathLength = reducedClasspath.size();
@@ -173,8 +171,8 @@ public final class Main {
           bound = fallback(options, units, bootclasspath, classPath);
           transitiveClasspathFallback = true;
         }
-        break;
-      case BAZEL_REDUCED:
+      }
+      case BAZEL_REDUCED -> {
         transitiveClasspathLength = options.fullClasspathLength();
         try {
           bound = bind(options, units, bootclasspath, classPath);
@@ -186,9 +184,8 @@ public final class Main {
               /* reducedClasspathLength= */ reducedClasspathLength,
               Statistics.empty());
         }
-        break;
-      default:
-        throw new AssertionError(reducedClasspathMode);
+      }
+      default -> throw new AssertionError(reducedClasspathMode);
     }
 
     if (options.outputDeps().isPresent()

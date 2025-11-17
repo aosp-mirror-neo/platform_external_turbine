@@ -8,13 +8,13 @@ third_party {
   license_type: NOTICE
   last_upgrade_date {
     year: 2025
-    month: 8
-    day: 8
+    month: 11
+    day: 12
   }
   homepage: "https://github.com/google/turbine"
   identifier {
     type: "Git"
     value: "https://github.com/google/turbine"
-    version: "b0f059e49f1dcdd4e579e00e39c3c09cf8047e65"
+    version: "3899d6b01e80a38dd2041fb6e2eefbb703bdd9b5"
   }
 }

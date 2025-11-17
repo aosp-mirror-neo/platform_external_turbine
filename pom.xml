@@ -32,7 +32,7 @@
   <properties>
     <asm.version>9.7</asm.version>
     <guava.version>32.1.1-jre</guava.version>
-    <errorprone.version>2.40.0</errorprone.version>
+    <errorprone.version>2.42.0</errorprone.version>
     <maven-javadoc-plugin.version>3.3.1</maven-javadoc-plugin.version>
     <maven-source-plugin.version>3.2.1</maven-source-plugin.version>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -146,7 +146,7 @@
     <dependency>
       <groupId>com.google.auto.value</groupId>
       <artifactId>auto-value-annotations</artifactId>
-      <version>1.9</version>
+      <version>1.11.0</version>
       <scope>provided</scope>
     </dependency>
     <dependency>
@@ -200,7 +200,7 @@
             <path>
               <groupId>com.google.auto.value</groupId>
               <artifactId>auto-value</artifactId>
-              <version>1.7.4</version>
+              <version>1.11.0</version>
             </path>
           </annotationProcessorPaths>
         </configuration>

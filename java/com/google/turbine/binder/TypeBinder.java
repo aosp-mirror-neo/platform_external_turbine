@@ -16,7 +16,6 @@
 
 package com.google.turbine.binder;
 
-import static com.google.common.collect.Iterables.getLast;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static java.util.Objects.requireNonNull;
 
@@ -61,7 +60,6 @@ import com.google.turbine.type.AnnoInfo;
 import com.google.turbine.type.Type;
 import com.google.turbine.type.Type.IntersectionTy;
 import com.google.turbine.types.Deannotate;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -260,7 +258,18 @@ public class TypeBinder {
               .build();
     }
 
-    ImmutableList<FieldInfo> fields = bindFields(scope, base.decl().members());
+    ImmutableList<FieldInfo> boundFields = bindFields(scope, base.decl().members());
+    ImmutableList<FieldInfo> fields;
+    if (base.kind().equals(TurbineTyKind.RECORD)) {
+      fields =
+          ImmutableList.<FieldInfo>builder()
+              // Implicit record fields will be output before any declared fields.
+              .addAll(recordFields(components))
+              .addAll(boundFields)
+              .build();
+    } else {
+      fields = boundFields;
+    }
 
     return new SourceTypeBoundClass(
         interfaceTypes.build(),
@@ -398,6 +407,21 @@ public class TypeBinder {
     return methods.build();
   }
 
+  private ImmutableList<FieldInfo> recordFields(ImmutableList<RecordComponentInfo> components) {
+    ImmutableList.Builder<FieldInfo> fields = ImmutableList.builder();
+    for (RecordComponentInfo c : components) {
+      fields.add(
+          new FieldInfo(
+              new FieldSymbol(owner, c.name()),
+              c.type(),
+              TurbineFlag.ACC_PRIVATE | TurbineFlag.ACC_FINAL,
+              c.annotations(),
+              /* decl= */ null,
+              /* value= */ null));
+    }
+    return fields.build();
+  }
+
   private MethodInfo defaultRecordConstructor(
       SyntheticMethods syntheticMethods, ImmutableList<RecordComponentInfo> components) {
     MethodSymbol symbol = syntheticMethods.create(owner, "<init>");
@@ -530,7 +554,7 @@ public class TypeBinder {
     int access = visibility.flag();
     access |= (base.access() & TurbineFlag.ACC_STRICT);
     if (!formals.isEmpty()
-        && (getLast(formals).access() & TurbineFlag.ACC_VARARGS) == TurbineFlag.ACC_VARARGS) {
+        && (formals.getLast().access() & TurbineFlag.ACC_VARARGS) == TurbineFlag.ACC_VARARGS) {
       access |= TurbineFlag.ACC_VARARGS;
     }
     return new MethodInfo(
@@ -917,14 +941,7 @@ public class TypeBinder {
 
   private Type bindClassTy(CompoundScope scope, Tree.ClassTy t) {
     // flatten the components of a qualified class type
-    ArrayList<Tree.ClassTy> flat;
-    {
-      ArrayDeque<Tree.ClassTy> builder = new ArrayDeque<>();
-      for (Tree.ClassTy curr = t; curr != null; curr = curr.base().orElse(null)) {
-        builder.addFirst(curr);
-      }
-      flat = new ArrayList<>(builder);
-    }
+    ImmutableList<Tree.ClassTy> flat = t.flatten();
     // the simple names of all classes in the qualified name
     ImmutableList.Builder<Tree.Ident> nameBuilder = ImmutableList.builder();
     for (Tree.ClassTy curr : flat) {
@@ -934,8 +951,12 @@ public class TypeBinder {
     // resolve the prefix to a symbol
     LookupResult result = scope.lookup(new LookupKey(names));
     if (result == null || result.sym() == null) {
-      log.error(names.get(0).position(), ErrorKind.CANNOT_RESOLVE, Joiner.on('.').join(names));
-      return Type.ErrorTy.create(names, bindTyArgs(scope, t.tyargs()));
+      log.error(names.getFirst().position(), ErrorKind.CANNOT_RESOLVE, Joiner.on('.').join(names));
+      ImmutableList.Builder<Type.ErrorTy.SimpleErrorTy> errorClasses = ImmutableList.builder();
+      for (Tree.ClassTy curr : flat) {
+        errorClasses.add(bindSimpleErrorTy(scope, curr));
+      }
+      return Type.ErrorTy.create(errorClasses.build());
     }
     Symbol sym = result.sym();
     int annoIdx = flat.size() - result.remaining().size() - 1;
@@ -947,7 +968,7 @@ public class TypeBinder {
       case TY_PARAM -> {
         if (!result.remaining().isEmpty()) {
           log.error(t.position(), ErrorKind.TYPE_PARAMETER_QUALIFIER);
-          yield Type.ErrorTy.create(names, ImmutableList.of());
+          yield Type.ErrorTy.create(names);
         }
         yield Type.TyVar.create((TyVarSymbol) sym, annos);
       }
@@ -957,7 +978,7 @@ public class TypeBinder {
 
   private Type bindClassTyRest(
       CompoundScope scope,
-      ArrayList<ClassTy> flat,
+      ImmutableList<ClassTy> flat,
       ImmutableList<Tree.Ident> bits,
       LookupResult result,
       ClassSymbol sym,
@@ -970,16 +991,30 @@ public class TypeBinder {
     for (; idx < flat.size(); idx++) {
       Tree.ClassTy curr = flat.get(idx);
       ClassSymbol next = resolveNext(sym, curr.name());
-      ImmutableList<Type> targs = bindTyArgs(scope, curr.tyargs());
       if (next == null) {
-        return Type.ErrorTy.create(bits, targs);
+        ImmutableList.Builder<Type.ErrorTy.SimpleErrorTy> errorClasses = ImmutableList.builder();
+        for (Type.ClassTy.SimpleClassTy c : classes.build()) {
+          errorClasses.add(
+              new Type.ErrorTy.SimpleErrorTy(c.sym().simpleName(), c.targs(), c.annos()));
+        }
+        for (; idx < flat.size(); idx++) {
+          errorClasses.add(bindSimpleErrorTy(scope, flat.get(idx)));
+        }
+        return Type.ErrorTy.create(errorClasses.build());
       }
       sym = next;
 
+      ImmutableList<Type> targs = bindTyArgs(scope, curr.tyargs());
       annotations = bindAnnotations(scope, curr.annos());
       classes.add(Type.ClassTy.SimpleClassTy.create(sym, targs, annotations));
     }
     return Type.ClassTy.create(classes.build());
+  }
+
+  private Type.ErrorTy.SimpleErrorTy bindSimpleErrorTy(CompoundScope scope, Tree.ClassTy classTy) {
+    ImmutableList<Type> tyargs = bindTyArgs(scope, classTy.tyargs());
+    ImmutableList<AnnoInfo> annos = bindAnnotations(scope, classTy.annos());
+    return new Type.ErrorTy.SimpleErrorTy(classTy.name().value(), tyargs, annos);
   }
 
   private Type.PrimTy bindPrimTy(CompoundScope scope, PrimTy t) {

@@ -33,7 +33,6 @@ import java.io.IOError;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -56,6 +55,7 @@ public class LowerIntegrationTest {
   private static final ImmutableMap<String, Integer> SOURCE_VERSION =
       ImmutableMap.ofEntries(
           entry("record.test", 16),
+          entry("record_fields.test", 16),
           entry("record2.test", 16),
           entry("record_tostring.test", 16),
           entry("record_ctor.test", 16),
@@ -291,6 +291,7 @@ public class LowerIntegrationTest {
       "record.test",
       "record2.test",
       "record_ctor.test",
+      "record_fields.test",
       "record_getter_override.test",
       "record_tostring.test",
       "rek.test",
@@ -376,7 +377,7 @@ public class LowerIntegrationTest {
     String shardFile = System.getenv("TEST_SHARD_STATUS_FILE");
     if (shardFile != null) {
       try {
-        Files.write(Paths.get(shardFile), new byte[0]);
+        Files.write(Path.of(shardFile), new byte[0]);
       } catch (IOException e) {
         throw new IOError(e);
       }
@@ -422,11 +423,15 @@ public class LowerIntegrationTest {
       requiredVersion = actualVersion;
       javacoptsBuilder.add("--enable-preview");
     }
-    javacoptsBuilder.add(
-        "-source", String.valueOf(requiredVersion), "-target", String.valueOf(requiredVersion));
-    javacoptsBuilder.add("-Xpkginfo:always");
-
-    ImmutableList<String> javacopts = javacoptsBuilder.build();
+    ImmutableList<String> javacopts =
+        javacoptsBuilder
+            .add(
+                "-source",
+                String.valueOf(requiredVersion),
+                "-target",
+                String.valueOf(requiredVersion))
+            .add("-Xpkginfo:always")
+            .build();
 
     Map<String, byte[]> expected =
         IntegrationTestSupport.runJavac(input.sources, classpathJar, javacopts);

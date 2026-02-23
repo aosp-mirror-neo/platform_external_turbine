@@ -18,7 +18,6 @@ package com.google.turbine.binder;
 
 import static java.util.Objects.requireNonNull;
 
-import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -68,6 +67,7 @@ import com.google.turbine.type.Type;
 import java.time.Duration;
 import java.util.Optional;
 import javax.annotation.processing.Processor;
+import javax.tools.Diagnostic;
 import org.jspecify.annotations.Nullable;
 
 /** The entry point for analysis. */
@@ -186,7 +186,10 @@ public final class Binder {
             log);
     tenv =
         canonicalizeTypes(
-            syms, tenv, CompoundEnv.<ClassSymbol, TypeBoundClass>of(classPathEnv).append(tenv));
+            syms,
+            tenv,
+            CompoundEnv.<ClassSymbol, TypeBoundClass>of(classPathEnv).append(tenv),
+            log);
 
     ImmutableList<SourceModuleInfo> boundModules =
         bindModules(
@@ -249,17 +252,15 @@ public final class Binder {
 
     SimpleEnv.Builder<ClassSymbol, PackageSourceBoundClass> env = SimpleEnv.builder();
     SimpleEnv.Builder<ModuleSymbol, PackageSourceBoundModule> modules = SimpleEnv.builder();
+    CompoundScope topLevel = CompoundScope.base(tli.scope());
     Scope javaLang = tli.lookupPackage(ImmutableList.of("java", "lang"));
     if (javaLang == null) {
-      // TODO(cushon): add support for diagnostics without a source position, and make this one
-      // of those
-      throw new IllegalArgumentException("Could not find java.lang on bootclasspath");
+      log.add(TurbineDiagnostic.format(Diagnostic.Kind.ERROR, ErrorKind.NO_JAVA_LANG));
+    } else {
+      topLevel = topLevel.append(javaLang);
     }
-    CompoundScope topLevel = CompoundScope.base(tli.scope()).append(javaLang);
     for (PreprocessedCompUnit unit : units) {
-      ImmutableList<String> packagename =
-          ImmutableList.copyOf(Splitter.on('/').omitEmptyStrings().split(unit.packageName()));
-      Scope packageScope = tli.lookupPackage(packagename);
+      Scope packageScope = tli.lookupPackage(unit.packageName());
       CanonicalSymbolResolver importResolver =
           new CanonicalResolver(
               unit.packageName(),
@@ -328,11 +329,12 @@ public final class Binder {
   private static Env<ClassSymbol, SourceTypeBoundClass> canonicalizeTypes(
       ImmutableSet<ClassSymbol> syms,
       Env<ClassSymbol, SourceTypeBoundClass> stenv,
-      Env<ClassSymbol, TypeBoundClass> tenv) {
+      Env<ClassSymbol, TypeBoundClass> tenv,
+      TurbineLog log) {
     SimpleEnv.Builder<ClassSymbol, SourceTypeBoundClass> builder = SimpleEnv.builder();
     for (ClassSymbol sym : syms) {
       SourceTypeBoundClass base = stenv.getNonNull(sym);
-      builder.put(sym, CanonicalTypeBinder.bind(sym, base, tenv));
+      builder.put(sym, CanonicalTypeBinder.bind(log.withSource(base.source()), sym, base, tenv));
     }
     return builder.build();
   }

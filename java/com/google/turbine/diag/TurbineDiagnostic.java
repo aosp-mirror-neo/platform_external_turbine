@@ -79,7 +79,7 @@ public class TurbineDiagnostic {
       requireNonNull(source); // line and column imply source is non-null
       sb.append(CharMatcher.breakingWhitespace().trimTrailingFrom(source.lineMap().line(position)))
           .append(System.lineSeparator());
-      sb.append(" ".repeat(column() - 1)).append('^');
+      sb.repeat(" ", column() - 1).append('^');
     }
     return sb.toString();
   }
@@ -109,6 +109,10 @@ public class TurbineDiagnostic {
 
   public static TurbineDiagnostic format(Diagnostic.Kind severity, ErrorKind kind, String message) {
     return create(severity, kind, ImmutableList.of(message), null, -1);
+  }
+
+  public static TurbineDiagnostic format(Diagnostic.Kind severity, ErrorKind kind) {
+    return create(severity, kind, ImmutableList.of(), null, -1);
   }
 
   /**

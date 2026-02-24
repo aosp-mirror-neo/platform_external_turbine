@@ -22,7 +22,6 @@ import static java.util.Objects.requireNonNull;
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.Iterables;
 import com.google.turbine.binder.bound.EnumConstantValue;
 import com.google.turbine.binder.bound.TurbineAnnotationValue;
 import com.google.turbine.binder.bound.TurbineClassValue;
@@ -62,7 +61,6 @@ import com.google.turbine.tree.Tree.Unary;
 import com.google.turbine.tree.TurbineOperatorKind;
 import com.google.turbine.type.AnnoInfo;
 import com.google.turbine.type.Type;
-import java.util.ArrayDeque;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -171,14 +169,11 @@ public class ConstEvaluator {
    * isn't completed during the hierarchy phase).
    */
   private Type resolveClass(ClassTy classTy) {
-    ArrayDeque<Ident> flat = new ArrayDeque<>();
-    for (ClassTy curr = classTy; curr != null; curr = curr.base().orElse(null)) {
-      flat.addFirst(curr.name());
-    }
-    LookupResult result = scope.lookup(new LookupKey(ImmutableList.copyOf(flat)));
+    ImmutableList<Ident> flat = classTy.qualifiedName();
+    LookupResult result = scope.lookup(new LookupKey(flat));
     if (result == null) {
       log.error(classTy.position(), ErrorKind.CANNOT_RESOLVE, flat.getFirst());
-      return Type.ErrorTy.create(flat, ImmutableList.of());
+      return Type.ErrorTy.create(flat);
     }
     if (result.sym().symKind() != Symbol.Kind.CLASS) {
       throw error(classTy.position(), ErrorKind.UNEXPECTED_TYPE_PARAMETER, flat.getFirst());
@@ -215,7 +210,7 @@ public class ConstEvaluator {
   }
 
   @Nullable FieldInfo resolveField(ConstVarName t) {
-    Ident simpleName = t.name().get(0);
+    Ident simpleName = t.name().getFirst();
     FieldInfo field = lexicalField(env, owner, simpleName);
     if (field != null) {
       return field;
@@ -267,7 +262,7 @@ public class ConstEvaluator {
         return null;
       }
     }
-    return Resolve.resolveField(env, origin, sym, Iterables.getLast(result.remaining()));
+    return Resolve.resolveField(env, origin, sym, result.remaining().getLast());
   }
 
   /** Search for constant variables in lexically enclosing scopes. */
@@ -807,8 +802,10 @@ public class ConstEvaluator {
   private Const.Value bitwiseAnd(int position, Const.Value a, Const.Value b) {
     switch (a.constantTypeKind()) {
       case BOOLEAN -> {
+        // We're evaluating constants and aren't required to report errors, so using
+        // short-circuiting operators is faster and not answer changing.
         return new Const.BooleanValue(
-            asBoolean(position, a).value() & asBoolean(position, b).value());
+            asBoolean(position, a).value() && asBoolean(position, b).value());
       }
       default -> {}
     }
@@ -825,8 +822,10 @@ public class ConstEvaluator {
   private Const.Value bitwiseOr(int position, Const.Value a, Const.Value b) {
     switch (a.constantTypeKind()) {
       case BOOLEAN -> {
+        // We're evaluating constants and aren't required to report errors, so using
+        // short-circuiting operators is faster and not answer changing.
         return new Const.BooleanValue(
-            asBoolean(position, a).value() | asBoolean(position, b).value());
+            asBoolean(position, a).value() || asBoolean(position, b).value());
       }
       default -> {}
     }
@@ -1022,7 +1021,7 @@ public class ConstEvaluator {
     LookupResult result = scope.lookup(new LookupKey(t.name()));
     if (result == null) {
       log.error(
-          t.name().get(0).position(), ErrorKind.CANNOT_RESOLVE, Joiner.on(".").join(t.name()));
+          t.name().getFirst().position(), ErrorKind.CANNOT_RESOLVE, Joiner.on(".").join(t.name()));
       return null;
     }
     ClassSymbol sym = (ClassSymbol) result.sym();

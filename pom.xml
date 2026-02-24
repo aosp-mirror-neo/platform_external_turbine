@@ -32,7 +32,7 @@
   <properties>
     <asm.version>9.7</asm.version>
     <guava.version>32.1.1-jre</guava.version>
-    <errorprone.version>2.42.0</errorprone.version>
+    <errorprone.version>2.47.0</errorprone.version>
     <maven-javadoc-plugin.version>3.3.1</maven-javadoc-plugin.version>
     <maven-source-plugin.version>3.2.1</maven-source-plugin.version>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -182,13 +182,14 @@
         <artifactId>maven-compiler-plugin</artifactId>
         <version>3.9.0</version>
         <configuration>
-          <source>16</source>
-          <target>16</target>
+          <source>21</source>
+          <target>21</target>
           <encoding>UTF-8</encoding>
           <compilerArgs>
             <arg>-parameters</arg>
             <arg>-XDcompilePolicy=simple</arg>
             <arg>--should-stop=ifError=FLOW</arg>
+            <arg>-XDaddTypeAnnotationsToSymbol=true</arg>
             <arg>-Xplugin:ErrorProne -Xep:EqualsIncompatibleType:ERROR -Xep:TruthIncompatibleType:ERROR</arg>
           </compilerArgs>
           <annotationProcessorPaths>
@@ -297,7 +298,7 @@
         <artifactId>maven-javadoc-plugin</artifactId>
         <version>3.3.1</version>
         <configuration>
-          <source>16</source>
+          <source>21</source>
           <detectJavaApiLink>false</detectJavaApiLink>
           <notimestamp>true</notimestamp>
           <doctitle>turbine ${project.version} API</doctitle>

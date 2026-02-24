@@ -50,7 +50,6 @@ import com.google.turbine.types.Erasure;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.function.Function;
 import javax.lang.model.element.Element;
 import javax.lang.model.element.TypeElement;
 import javax.lang.model.type.ArrayType;
@@ -205,7 +204,7 @@ public class TurbineTypes implements Types {
     if (bounds.isEmpty()) {
       return true;
     }
-    Type bound = bounds.get(0);
+    Type bound = bounds.getFirst();
     return switch (bound.tyKind()) {
       case TY_VAR -> false;
       case CLASS_TY ->
@@ -441,7 +440,7 @@ public class TurbineTypes implements Types {
       }
       // perform repeated type substitution to get an instance of B with the type arguments
       // provided by A
-      a = path.get(0);
+      a = path.getFirst();
       for (ClassTy ty : path) {
         ImmutableMap<TyVarSymbol, Type> mapping = getMapping(ty);
         if (mapping == null) {
@@ -791,7 +790,7 @@ public class TurbineTypes implements Types {
               ImmutableList.of(ClassTy.OBJECT, ClassTy.SERIALIZABLE, ClassTy.CLONEABLE)));
     }
     ImmutableList<Type> ex = directSupertypes(elem);
-    return ImmutableList.of(ArrayTy.create(ex.iterator().next(), ImmutableList.of()));
+    return ImmutableList.of(ArrayTy.create(ex.get(0), ImmutableList.of()));
   }
 
   private ImmutableList<Type> directSupertypes(ClassTy t) {
@@ -822,14 +821,7 @@ public class TurbineTypes implements Types {
   }
 
   private Type erasure(Type type) {
-    return Erasure.erase(
-        type,
-        new Function<TyVarSymbol, TyVarInfo>() {
-          @Override
-          public TyVarInfo apply(TyVarSymbol input) {
-            return factory.getTyVarInfo(input);
-          }
-        });
+    return Erasure.erase(type, factory::getTyVarInfo);
   }
 
   @Override

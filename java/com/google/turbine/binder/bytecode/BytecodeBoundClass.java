@@ -80,13 +80,7 @@ public class BytecodeBoundClass implements TypeBoundClass {
       Supplier<byte[]> bytes,
       Env<ClassSymbol, BytecodeBoundClass> env,
       Path path) {
-    return Suppliers.memoize(
-        new Supplier<BytecodeBoundClass>() {
-          @Override
-          public BytecodeBoundClass get() {
-            return new BytecodeBoundClass(sym, bytes, env, path.toString());
-          }
-        });
+    return Suppliers.memoize(() -> new BytecodeBoundClass(sym, bytes, env, path.toString()));
   }
 
   private final ClassSymbol sym;
@@ -104,17 +98,14 @@ public class BytecodeBoundClass implements TypeBoundClass {
     this.jarFile = jarFile;
     this.classFile =
         Suppliers.memoize(
-            new Supplier<ClassFile>() {
-              @Override
-              public ClassFile get() {
-                ClassFile cf = ClassReader.read(jarFile + "!" + sym.binaryName(), bytes.get());
-                verify(
-                    cf.name().equals(sym.binaryName()),
-                    "expected class data for %s, saw %s instead",
-                    sym.binaryName(),
-                    cf.name());
-                return cf;
-              }
+            () -> {
+              ClassFile cf = ClassReader.read(jarFile + "!" + sym.binaryName(), bytes.get());
+              verify(
+                  cf.name().equals(sym.binaryName()),
+                  "expected class data for %s, saw %s instead",
+                  sym.binaryName(),
+                  cf.name());
+              return cf;
             });
   }
 
@@ -132,6 +123,9 @@ public class BytecodeBoundClass implements TypeBoundClass {
               }
               if ((access & TurbineFlag.ACC_ENUM) == TurbineFlag.ACC_ENUM) {
                 return TurbineTyKind.ENUM;
+              }
+              if (classFile.get().record() != null) {
+                return TurbineTyKind.RECORD;
               }
               return TurbineTyKind.CLASS;
             }

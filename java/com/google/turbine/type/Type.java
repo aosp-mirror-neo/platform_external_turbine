@@ -16,7 +16,6 @@
 
 package com.google.turbine.type;
 
-import static com.google.common.collect.Iterables.getLast;
 import static java.lang.Math.max;
 import static java.util.Objects.requireNonNull;
 
@@ -25,7 +24,6 @@ import com.google.auto.value.extension.memoized.Memoized;
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Iterables;
 import com.google.turbine.binder.sym.ClassSymbol;
 import com.google.turbine.binder.sym.TyVarSymbol;
 import com.google.turbine.model.TurbineConstantTypeKind;
@@ -137,7 +135,7 @@ public interface Type {
 
     /** The class symbol. */
     public ClassSymbol sym() {
-      return getLast(classes()).sym();
+      return classes().getLast().sym();
     }
 
     @Override
@@ -199,7 +197,7 @@ public interface Type {
     @Memoized
     @Override
     public int hashCode() {
-      return Iterables.getLast(classes()).hashCode();
+      return classes().getLast().hashCode();
     }
 
     @Override
@@ -544,36 +542,59 @@ public interface Type {
   /** An error type. */
   final class ErrorTy implements Type {
 
-    private final String name;
-    private final ImmutableList<Type> targs;
+    /** One element of a qualified {@link ErrorTy}. */
+    public record SimpleErrorTy(
+        String name, ImmutableList<Type> targs, ImmutableList<AnnoInfo> annos) {}
 
-    private ErrorTy(String name, ImmutableList<Type> targs) {
-      this.name = requireNonNull(name);
-      this.targs = requireNonNull(targs);
+    private final ImmutableList<SimpleErrorTy> classes;
+
+    private ErrorTy(ImmutableList<SimpleErrorTy> classes) {
+      this.classes = requireNonNull(classes);
+    }
+
+    public String simpleName() {
+      return classes.getLast().name();
     }
 
     /**
      * Best-effort syntactic context for use in diagnostics or by annotation processors. This may be
      * a simple or qualified name; it is not a canonical qualified name.
      */
-    public String name() {
-      return name;
+    public String qualifiedName() {
+      List<String> names = new ArrayList<>();
+      for (SimpleErrorTy simple : classes) {
+        names.add(simple.name());
+      }
+      return Joiner.on('.').join(names);
     }
 
     public ImmutableList<Type> targs() {
-      return targs;
+      return classes.getLast().targs();
     }
 
-    public static ErrorTy create(Iterable<Tree.Ident> names, ImmutableList<Type> targs) {
-      List<String> bits = new ArrayList<>();
+    public ImmutableList<AnnoInfo> annos() {
+      return classes.getLast().annos();
+    }
+
+    public ImmutableList<SimpleErrorTy> classes() {
+      return classes;
+    }
+
+    public static ErrorTy create(ImmutableList<SimpleErrorTy> classes) {
+      return new ErrorTy(classes);
+    }
+
+    public static ErrorTy create(Iterable<Tree.Ident> names) {
+      ImmutableList.Builder<SimpleErrorTy> classes = ImmutableList.builder();
       for (Tree.Ident ident : names) {
-        bits.add(ident.value());
+        classes.add(new SimpleErrorTy(ident.value(), ImmutableList.of(), ImmutableList.of()));
       }
-      return create(Joiner.on('.').join(bits), targs);
+      return create(classes.build());
     }
 
-    public static ErrorTy create(String name, ImmutableList<Type> targs) {
-      return new ErrorTy(name, targs);
+    public static ErrorTy create(String name) {
+      return create(
+          ImmutableList.of(new SimpleErrorTy(name, ImmutableList.of(), ImmutableList.of())));
     }
 
     @Override
@@ -583,8 +604,10 @@ public interface Type {
 
     @Override
     public final String toString() {
+      // This is used to implement javax.lang.model.type.ErrorType, so only print information that
+      // is available in javac's model, see https://bugs.openjdk.org/browse/JDK-8340694.
       StringBuilder sb = new StringBuilder();
-      sb.append(name());
+      sb.append(qualifiedName());
       if (!targs().isEmpty()) {
         sb.append('<');
         Joiner.on(',').appendTo(sb, targs());

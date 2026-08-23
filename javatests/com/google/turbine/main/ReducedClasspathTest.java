@@ -41,8 +41,14 @@ import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.Set;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
+import javax.annotation.processing.AbstractProcessor;
+import javax.annotation.processing.RoundEnvironment;
+import javax.annotation.processing.SupportedAnnotationTypes;
+import javax.lang.model.SourceVersion;
+import javax.lang.model.element.TypeElement;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
@@ -245,6 +251,65 @@ public class ReducedClasspathTest {
                         .setDepsArtifacts(ImmutableList.of(libcJdeps.toString()))
                         .build()));
     assertThat(e).hasMessageThat().contains("could not resolve I");
+  }
+
+  @SupportedAnnotationTypes("*")
+  public static class CrashOnMissingSymbolProcessor extends AbstractProcessor {
+    @Override
+    public SourceVersion getSupportedSourceVersion() {
+      return SourceVersion.latestSupported();
+    }
+
+    @Override
+    public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
+      if (processingEnv.getElementUtils().getTypeElement("a.A") == null) {
+        throw new RuntimeException("Missing a.A on classpath!");
+      }
+      return false;
+    }
+  }
+
+  @Test
+  public void bazelReducedFallback_annotationProcessorCrash() throws Exception {
+    Path src = temporaryFolder.newFile("Test.java").toPath();
+    Files.write(
+        src,
+        ImmutableList.of(
+            "import c.C;", //
+            "class Test extends C {",
+            "  I i;",
+            "}"),
+        UTF_8);
+
+    Path output = temporaryFolder.newFile("output.jar").toPath();
+    Path jdeps = temporaryFolder.newFile("output.jdeps").toPath();
+
+    Result result =
+        Main.compile(
+            optionsWithBootclasspath()
+                .setOutput(output.toString())
+                .setTargetLabel("//java/com/google/foo")
+                .setOutputDeps(jdeps.toString())
+                .setSources(ImmutableList.of(src.toString()))
+                .setProcessors(ImmutableList.of(CrashOnMissingSymbolProcessor.class.getName()))
+                .setReducedClasspathMode(ReducedClasspathMode.BAZEL_REDUCED)
+                .setClassPath(ImmutableList.of(libc.toString()))
+                .setReducedClasspathLength(1)
+                .setFullClasspathLength(3)
+                .build());
+    assertThat(result.transitiveClasspathFallback()).isTrue();
+    assertThat(result.reducedClasspathLength()).isEqualTo(1);
+    assertThat(result.transitiveClasspathLength()).isEqualTo(3);
+    DepsProto.Dependencies.Builder deps = DepsProto.Dependencies.newBuilder();
+    try (InputStream is = new BufferedInputStream(Files.newInputStream(jdeps))) {
+      deps.mergeFrom(is, ExtensionRegistry.getEmptyRegistry());
+    }
+    assertThat(deps.build())
+        .isEqualTo(
+            DepsProto.Dependencies.newBuilder()
+                .setRequiresReducedClasspathFallback(true)
+                .setRuleLabel("//java/com/google/foo")
+                .build());
   }
 
   static String lines(String... lines) {

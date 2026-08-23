@@ -184,7 +184,7 @@ public final class Main {
         reducedClasspathLength = reducedClasspath.size();
         try {
           bound = bind(executor, options, units, bootclasspath, reducedClasspath);
-        } catch (TurbineError e) {
+        } catch (TurbineError | AnnotationProcessingError e) {
           bound = fallback(executor, options, units, bootclasspath, classPath);
           transitiveClasspathFallback = true;
         }
@@ -193,7 +193,7 @@ public final class Main {
         transitiveClasspathLength = options.fullClasspathLength();
         try {
           bound = bind(executor, options, units, bootclasspath, classPath);
-        } catch (TurbineError e) {
+        } catch (TurbineError | AnnotationProcessingError e) {
           writeJdepsForFallback(options);
           return Result.create(
               /* transitiveClasspathFallback= */ true,

@@ -17,7 +17,6 @@
 package com.google.turbine.processing;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
-import static com.google.common.collect.MoreCollectors.onlyElement;
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.TruthJUnit.assume;
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -259,10 +258,9 @@ public class ProcessingIntegrationTest {
     assertThat(bound.generatedSources().keySet()).containsExactly("Gen.java", "source.txt");
     assertThat(bound.generatedClasses().keySet()).containsExactly("class.txt");
 
-    // The requireNonNull calls are safe because of the keySet checks above.
-    assertThat(requireNonNull(bound.generatedSources().get("source.txt")).source())
+    assertThat(bound.generatedSources().get("source.txt").source())
         .isEqualTo("hello source output");
-    assertThat(new String(requireNonNull(bound.generatedClasses().get("class.txt")), UTF_8))
+    assertThat(new String(bound.generatedClasses().get("class.txt"), UTF_8))
         .isEqualTo("hello class output");
   }
 
@@ -296,13 +294,7 @@ public class ProcessingIntegrationTest {
     assertThat(
             Splitter.on(System.lineSeparator())
                 .omitEmptyStrings()
-                .split(
-                    new String(
-                        bound.generatedClasses().entrySet().stream()
-                            .filter(s -> s.getKey().equals("output.txt"))
-                            .collect(onlyElement())
-                            .getValue(),
-                        UTF_8)))
+                .split(new String(bound.generatedClasses().get("output.txt"), UTF_8)))
         .containsExactly("A: One, Two", "B: One");
   }
 
@@ -706,7 +698,7 @@ public class ProcessingIntegrationTest {
     try (OutputStream os = Files.newOutputStream(libJar);
         JarOutputStream jos = new JarOutputStream(os)) {
       jos.putNextEntry(new JarEntry("foo/MyRecord.class"));
-      jos.write(requireNonNull(library.get("foo/MyRecord")));
+      jos.write(library.get("foo/MyRecord"));
     }
 
     ImmutableList<Tree.CompUnit> units =
@@ -924,7 +916,7 @@ public class ProcessingIntegrationTest {
         JarOutputStream jos = new JarOutputStream(os)) {
       // deliberately exclude the definition of the annotation
       jos.putNextEntry(new JarEntry("T.class"));
-      jos.write(requireNonNull(library.get("T")));
+      jos.write(library.get("T"));
     }
 
     ImmutableList<Tree.CompUnit> units =
@@ -1499,7 +1491,7 @@ public class ProcessingIntegrationTest {
     try (OutputStream os = Files.newOutputStream(libJar);
         JarOutputStream jos = new JarOutputStream(os)) {
       jos.putNextEntry(new JarEntry("T.class"));
-      jos.write(requireNonNull(library.get("T")));
+      jos.write(library.get("T"));
     }
 
     ImmutableList<Tree.CompUnit> units =

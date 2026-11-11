@@ -302,9 +302,9 @@ public class ParseErrorTest {
         .hasMessageThat()
         .isEqualTo(
             lines(
-                "<>:1: error: could not evaluate constant expression",
+                "<>:1: error: invalid annotation argument",
                 "@j(@truetugt^(oflur)!%t",
-                "                     ^"));
+                "                    ^"));
   }
 
   @Test

@@ -21,13 +21,13 @@ import static java.util.Objects.requireNonNull;
 import com.google.auto.value.AutoValue;
 import com.google.common.base.Joiner;
 import com.google.common.base.Stopwatch;
-import com.google.common.base.Supplier;
 import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.ImmutableSetMultimap;
 import com.google.common.collect.Sets;
+import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.turbine.binder.Binder.BindingResult;
 import com.google.turbine.binder.Binder.Statistics;
 import com.google.turbine.binder.bound.SourceTypeBoundClass;
@@ -65,7 +65,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
-import java.util.function.Function;
 import java.util.regex.Pattern;
 import javax.annotation.processing.Processor;
 import javax.lang.model.SourceVersion;
@@ -77,6 +76,7 @@ import org.jspecify.annotations.Nullable;
 public class Processing {
 
   static @Nullable BindingResult process(
+      ListeningExecutorService executor,
       TurbineLog log,
       final ImmutableList<CompUnit> initialSources,
       final ClassPath classpath,
@@ -95,22 +95,19 @@ public class Processing {
     TurbineFiler filer =
         new TurbineFiler(
             seen,
-            new Function<String, @Nullable Supplier<byte[]>>() {
-              @Override
-              public @Nullable Supplier<byte[]> apply(String input) {
-                // TODO(cushon): should annotation processors be allowed to generate code with
-                // dependencies between source and bytecode, or vice versa?
-                // Currently generated classes are not available on the classpath when compiling
-                // the compilation sources (including generated sources).
-                return classpath.resource(input);
-              }
+            (String input) -> {
+              // TODO(cushon): should annotation processors be allowed to generate code with
+              // dependencies between source and bytecode, or vice versa?
+              // Currently generated classes are not available on the classpath when compiling
+              // the compilation sources (including generated sources).
+              return classpath.resource(input);
             },
             processorInfo.loader());
 
     Env<ClassSymbol, SourceTypeBoundClass> tenv = new SimpleEnv<>(result.units());
     CompoundEnv<ClassSymbol, TypeBoundClass> env =
         CompoundEnv.<ClassSymbol, TypeBoundClass>of(result.classPathEnv()).append(tenv);
-    ModelFactory factory = new ModelFactory(env, processorInfo.loader(), result.tli());
+    ModelFactory factory = new ModelFactory(env, result.tli());
 
     Map<String, byte[]> statistics = new LinkedHashMap<>();
 
@@ -198,6 +195,7 @@ public class Processing {
       log.clear();
       result =
           Binder.bind(
+              executor,
               log,
               units.build(),
               filer.generatedSources(),
@@ -239,6 +237,7 @@ public class Processing {
       }
       result =
           Binder.bind(
+              executor,
               log,
               units.build(),
               filer.generatedSources(),
@@ -275,12 +274,7 @@ public class Processing {
     return result.buildOrThrow();
   }
 
-  @AutoValue
-  abstract static class SupportedAnnotationTypes {
-
-    abstract boolean everything();
-
-    abstract Pattern pattern();
+  record SupportedAnnotationTypes(boolean everything, Pattern pattern) {
 
     static SupportedAnnotationTypes create(Processor processor) {
       List<String> patterns = new ArrayList<>();
@@ -293,7 +287,7 @@ public class Processing {
           patterns.add(supportedAnnotationType);
         }
       }
-      return new AutoValue_Processing_SupportedAnnotationTypes(
+      return new SupportedAnnotationTypes(
           everything, Pattern.compile(Joiner.on('|').join(patterns)));
     }
   }
@@ -457,7 +451,7 @@ public class Processing {
     return urls;
   }
 
-  private static ImmutableMap<String, String> processorOptions(ImmutableList<String> javacopts) {
+  public static ImmutableMap<String, String> processorOptions(ImmutableList<String> javacopts) {
     Map<String, String> result = new LinkedHashMap<>(); // ImmutableMap.Builder rejects duplicates
     for (String javacopt : javacopts) {
       if (javacopt.startsWith("-A")) {
@@ -503,7 +497,7 @@ public class Processing {
       return new AutoValue_Processing_ProcessorInfo(processors, loader, options, sourceVersion);
     }
 
-    static ProcessorInfo empty() {
+    public static ProcessorInfo empty() {
       return create(
           /* processors= */ ImmutableList.of(),
           /* loader= */ null,

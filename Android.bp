@@ -47,7 +47,10 @@ java_library_host {
         "jspecify",
     ],
 
-    plugins: ["auto_value_plugin"],
+    plugins: [
+        "auto_value_builder_plugin",
+        "auto_value_plugin",
+    ],
     libs: [
         "auto_value_annotations",
         "auto_value_memoized_extension_annotations",

@@ -176,7 +176,9 @@ public class ConstBinder {
     ImmutableList.Builder<RecordComponentInfo> result = ImmutableList.builder();
     for (RecordComponentInfo base : components) {
       ImmutableList<AnnoInfo> annos = constEvaluator.evaluateAnnotations(base.annotations());
-      result.add(new RecordComponentInfo(base.sym(), bindType(base.type()), annos, base.access()));
+      result.add(
+          new RecordComponentInfo(
+              base.sym(), bindType(base.type()), annos, base.access(), base.decl()));
     }
     return result.build();
   }
@@ -195,17 +197,10 @@ public class ConstBinder {
         continue;
       }
       switch (sym.binaryName()) {
-        case "java/lang/annotation/Retention":
-          retention = bindRetention(annotation);
-          break;
-        case "java/lang/annotation/Target":
-          target = bindTarget(annotation);
-          break;
-        case "java/lang/annotation/Repeatable":
-          repeatable = bindRepeatable(annotation);
-          break;
-        default:
-          break;
+        case "java/lang/annotation/Retention" -> retention = bindRetention(annotation);
+        case "java/lang/annotation/Target" -> target = bindTarget(annotation);
+        case "java/lang/annotation/Repeatable" -> repeatable = bindRepeatable(annotation);
+        default -> {}
       }
     }
     return new AnnotationMetadata(retention, target, repeatable);
@@ -231,18 +226,15 @@ public class ConstBinder {
     // requireNonNull is safe because java.lang.annotation.Target declares `value`.
     Const val = requireNonNull(annotation.values().get("value"));
     switch (val.kind()) {
-      case ARRAY:
+      case ARRAY -> {
         for (Const element : ((ArrayInitValue) val).elements()) {
           if (element.kind() == Kind.ENUM_CONSTANT) {
             bindTargetElement(result, (EnumConstantValue) element);
           }
         }
-        break;
-      case ENUM_CONSTANT:
-        bindTargetElement(result, (EnumConstantValue) val);
-        break;
-      default:
-        break;
+      }
+      case ENUM_CONSTANT -> bindTargetElement(result, (EnumConstantValue) val);
+      default -> {}
     }
     return result.build();
   }
@@ -298,7 +290,7 @@ public class ConstBinder {
         if (((Type.ClassTy) type).sym().equals(ClassSymbol.STRING)) {
           break;
         }
-        // falls through
+      // falls through
       default:
         return null;
     }
@@ -338,43 +330,36 @@ public class ConstBinder {
   }
 
   private Type bindType(Type type) {
-    switch (type.tyKind()) {
-      case TY_VAR:
+    return switch (type.tyKind()) {
+      case TY_VAR -> {
         TyVar tyVar = (TyVar) type;
-        return TyVar.create(tyVar.sym(), constEvaluator.evaluateAnnotations(tyVar.annos()));
-      case CLASS_TY:
-        return bindClassType((ClassTy) type);
-      case ARRAY_TY:
+        yield TyVar.create(tyVar.sym(), constEvaluator.evaluateAnnotations(tyVar.annos()));
+      }
+      case CLASS_TY -> bindClassType((ClassTy) type);
+      case ARRAY_TY -> {
         ArrayTy arrayTy = (ArrayTy) type;
-        return ArrayTy.create(
+        yield ArrayTy.create(
             bindType(arrayTy.elementType()), constEvaluator.evaluateAnnotations(arrayTy.annos()));
-      case WILD_TY:
-        {
-          WildTy wildTy = (WildTy) type;
-          switch (wildTy.boundKind()) {
-            case NONE:
-              return WildUnboundedTy.create(
-                  constEvaluator.evaluateAnnotations(wildTy.annotations()));
-            case UPPER:
-              return WildUpperBoundedTy.create(
+      }
+      case WILD_TY -> {
+        WildTy wildTy = (WildTy) type;
+        yield switch (wildTy.boundKind()) {
+          case NONE ->
+              WildUnboundedTy.create(constEvaluator.evaluateAnnotations(wildTy.annotations()));
+          case UPPER ->
+              WildUpperBoundedTy.create(
                   bindType(wildTy.bound()),
                   constEvaluator.evaluateAnnotations(wildTy.annotations()));
-            case LOWER:
-              return WildLowerBoundedTy.create(
+          case LOWER ->
+              WildLowerBoundedTy.create(
                   bindType(wildTy.bound()),
                   constEvaluator.evaluateAnnotations(wildTy.annotations()));
-          }
-          throw new AssertionError(wildTy.boundKind());
-        }
-      case PRIM_TY:
-      case VOID_TY:
-      case ERROR_TY:
-        return type;
-      case INTERSECTION_TY:
-        return IntersectionTy.create(bindTypes(((IntersectionTy) type).bounds()));
-      default:
-        throw new AssertionError(type.tyKind());
-    }
+        };
+      }
+      case PRIM_TY, VOID_TY, ERROR_TY -> type;
+      case INTERSECTION_TY -> IntersectionTy.create(bindTypes(((IntersectionTy) type).bounds()));
+      case NONE_TY, METHOD_TY -> throw new AssertionError(type.tyKind());
+    };
   }
 
   private ClassTy bindClassType(ClassTy type) {

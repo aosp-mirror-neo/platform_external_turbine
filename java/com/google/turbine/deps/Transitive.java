@@ -29,9 +29,11 @@ import com.google.turbine.binder.sym.ClassSymbol;
 import com.google.turbine.bytecode.ClassFile;
 import com.google.turbine.bytecode.ClassFile.FieldInfo;
 import com.google.turbine.bytecode.ClassFile.InnerClass;
+import com.google.turbine.bytecode.ClassReader;
 import com.google.turbine.bytecode.ClassWriter;
 import com.google.turbine.model.TurbineFlag;
 import java.util.LinkedHashSet;
+import java.util.Map;
 import java.util.Set;
 import org.jspecify.annotations.Nullable;
 
@@ -63,6 +65,20 @@ public final class Transitive {
     return transitive.buildOrThrow();
   }
 
+  public static ImmutableMap<String, byte[]> trimOutput(ImmutableMap<String, byte[]> lowered) {
+    ImmutableMap.Builder<String, byte[]> trimmed = ImmutableMap.builder();
+    for (Map.Entry<String, byte[]> sym : lowered.entrySet()) {
+      if (sym.getKey().equals("module-info")) {
+        // Module attributes get trimmed which make module-infos invalid, and turbine doesn't need
+        // modules anyways, so just drop them for now.
+        continue;
+      }
+      trimmed.put(
+          sym.getKey(), ClassWriter.writeClass(trimClass(ClassReader.read(sym.getValue()), null)));
+    }
+    return trimmed.buildOrThrow();
+  }
+
   /**
    * Removes information from repackaged classes that will not be needed by upstream compilations.
    */
@@ -70,7 +86,7 @@ public final class Transitive {
     // drop non-constant fields
     ImmutableList.Builder<FieldInfo> fields = ImmutableList.builder();
     for (FieldInfo f : cf.fields()) {
-      if (f.value() != null) {
+      if (keepField(f)) {
         fields.add(f);
       }
     }
@@ -113,6 +129,18 @@ public final class Transitive {
         /* nestMembers= */ ImmutableList.of(),
         /* record= */ null,
         /* transitiveJar= */ transitiveJar);
+  }
+
+  private static boolean keepField(FieldInfo f) {
+    if (f.value() != null) {
+      // keep compile-time constant fields
+      return true;
+    }
+    if ((f.access() & TurbineFlag.ACC_ENUM) == TurbineFlag.ACC_ENUM) {
+      // keep enum constants, which can be used as annotation values
+      return true;
+    }
+    return false;
   }
 
   private static Set<ClassSymbol> superClosure(BindingResult bound) {

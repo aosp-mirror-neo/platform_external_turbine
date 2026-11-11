@@ -16,7 +16,6 @@
 
 package com.google.turbine.parse;
 
-import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.turbine.parse.UnicodeEscapePreprocessor.ASCII_SUB;
 import static java.lang.Math.min;
@@ -25,6 +24,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.turbine.diag.SourceFile;
 import com.google.turbine.diag.TurbineError;
 import com.google.turbine.diag.TurbineError.ErrorKind;
+import com.google.turbine.model.TurbineJavadoc;
 import org.jspecify.annotations.Nullable;
 
 /** A {@link Lexer} that streams input from a {@link UnicodeEscapePreprocessor}. */
@@ -38,14 +38,14 @@ public class StreamLexer implements Lexer {
   /** The start position of the current token. */
   private int position;
 
-  /** The start position of the current numeric literal or identifier token. */
+  /** The start position of a numeric literal, identifier, or doc comment token. */
   private int readFrom;
 
   /** The value of the current string or character literal token. */
   private String value = null;
 
   /** A saved javadoc comment. */
-  private String javadoc = null;
+  private TurbineJavadoc javadoc = null;
 
   public StreamLexer(UnicodeEscapePreprocessor reader) {
     this.reader = reader;
@@ -69,14 +69,8 @@ public class StreamLexer implements Lexer {
   }
 
   @Override
-  public @Nullable String javadoc() {
-    String result = javadoc;
-    javadoc = null;
-    if (result == null) {
-      return null;
-    }
-    verify(result.endsWith("*"), result);
-    return result.substring(0, result.length() - "*".length());
+  public @Nullable TurbineJavadoc javadoc() {
+    return javadoc;
   }
 
   @Override
@@ -99,382 +93,444 @@ public class StreamLexer implements Lexer {
 
   @Override
   public Token next() {
-    OUTER:
+    javadoc = null;
     while (true) {
       position = reader.position();
       switch (ch) {
-        case '\r':
-        case '\n':
-        case ' ':
-        case '\t':
-        case '\f':
+        case '\r', '\n', ' ', '\t', '\f' -> eat();
+        case '/' -> {
           eat();
-          continue OUTER;
-
-        case '/':
-          {
-            eat();
-            switch (ch) {
-              case '/':
-                while (true) {
-                  eat();
+          switch (ch) {
+            case '/' -> {
+              eat();
+              Token token =
                   switch (ch) {
-                    case '\n':
-                    case '\r':
+                    case '/' -> {
                       eat();
-                      continue OUTER;
-                    case ASCII_SUB:
-                      if (reader.done()) {
-                        return Token.EOF;
-                      }
-                      eat();
-                      break;
-                    default: // fall out
-                  }
-                }
-              case '*':
+                      yield markdownJavadoc();
+                    }
+                    // a regular line comment (not markdown javadoc)
+                    default -> endOfLineComment();
+                  };
+              if (token != null) {
+                return token;
+              }
+            }
+            case '*' -> traditionalComment();
+            default -> {
+              if (ch == '=') {
                 eat();
-                boolean sawStar = false;
-                boolean isJavadoc = false;
-                if (ch == '*') {
-                  eat();
-                  // handle empty non-javadoc comments: `/**/`
-                  if (ch == '/') {
-                    eat();
-                    continue OUTER;
-                  }
-                  isJavadoc = true;
-                  readFrom();
-                }
-                while (true) {
-                  switch (ch) {
-                    case '*':
-                      eat();
-                      sawStar = true;
-                      break;
-                    case '/':
-                      if (sawStar) {
-                        if (isJavadoc) {
-                          // Save the comment, excluding the leading `/**` and including
-                          // the trailing `/*`. The comment is trimmed and normalized later.
-                          javadoc = stringValue();
-                          verify(javadoc.endsWith("*"), javadoc);
-                        }
-                        eat();
-                        continue OUTER;
-                      }
-                      sawStar = false;
-                      eat();
-                      break;
-                    case ASCII_SUB:
-                      if (reader.done()) {
-                        throw TurbineError.format(
-                            reader.source(), position, ErrorKind.UNCLOSED_COMMENT);
-                      }
-                      eat();
-                      sawStar = false;
-                      break;
-                    default:
-                      eat();
-                      sawStar = false;
-                      break;
-                  }
-                }
-              default:
-                if (ch == '=') {
-                  eat();
-                  return Token.DIVEQ;
-                }
-                return Token.DIV;
+                return Token.DIVEQ;
+              }
+              return Token.DIV;
             }
           }
-
-        case 'a':
-        case 'b':
-        case 'c':
-        case 'd':
-        case 'e':
-        case 'f':
-        case 'g':
-        case 'h':
-        case 'i':
-        case 'j':
-        case 'k':
-        case 'l':
-        case 'm':
-        case 'n':
-        case 'o':
-        case 'p':
-        case 'q':
-        case 'r':
-        case 's':
-        case 't':
-        case 'u':
-        case 'v':
-        case 'w':
-        case 'x':
-        case 'y':
-        case 'z':
-        case 'A':
-        case 'B':
-        case 'C':
-        case 'D':
-        case 'E':
-        case 'F':
-        case 'G':
-        case 'H':
-        case 'I':
-        case 'J':
-        case 'K':
-        case 'L':
-        case 'M':
-        case 'N':
-        case 'O':
-        case 'P':
-        case 'Q':
-        case 'R':
-        case 'S':
-        case 'T':
-        case 'U':
-        case 'V':
-        case 'W':
-        case 'X':
-        case 'Y':
-        case 'Z':
-        case '_':
-        case '$':
+        }
+        case 'a',
+            'b',
+            'c',
+            'd',
+            'e',
+            'f',
+            'g',
+            'h',
+            'i',
+            'j',
+            'k',
+            'l',
+            'm',
+            'n',
+            'o',
+            'p',
+            'q',
+            'r',
+            's',
+            't',
+            'u',
+            'v',
+            'w',
+            'x',
+            'y',
+            'z',
+            'A',
+            'B',
+            'C',
+            'D',
+            'E',
+            'F',
+            'G',
+            'H',
+            'I',
+            'J',
+            'K',
+            'L',
+            'M',
+            'N',
+            'O',
+            'P',
+            'Q',
+            'R',
+            'S',
+            'T',
+            'U',
+            'V',
+            'W',
+            'X',
+            'Y',
+            'Z',
+            '_',
+            '$' -> {
           return identifier();
-
-        case ASCII_SUB:
+        }
+        case ASCII_SUB -> {
           if (!reader.done()) {
             throw error(ErrorKind.UNEXPECTED_EOF);
           }
           return Token.EOF;
-
-        case '-':
-        case '=':
-        case '>':
-        case '<':
-        case '!':
-        case '~':
-        case '+':
-        case '?':
-        case ':':
-        case '*':
-        case '&':
-        case '|':
-        case '^':
-        case '%':
+        }
+        case '-', '=', '>', '<', '!', '~', '+', '?', ':', '*', '&', '|', '^', '%' -> {
           return operator();
-        case '(':
+        }
+        case '(' -> {
           eat();
           return Token.LPAREN;
-        case ')':
+        }
+        case ')' -> {
           eat();
           return Token.RPAREN;
-        case '{':
+        }
+        case '{' -> {
           eat();
           return Token.LBRACE;
-        case '}':
+        }
+        case '}' -> {
           eat();
           return Token.RBRACE;
-        case '[':
+        }
+        case '[' -> {
           eat();
           return Token.LBRACK;
-        case ']':
+        }
+        case ']' -> {
           eat();
           return Token.RBRACK;
-        case ';':
+        }
+        case ';' -> {
           eat();
           return Token.SEMI;
-        case ',':
+        }
+        case ',' -> {
           eat();
           return Token.COMMA;
-        case '@':
+        }
+        case '@' -> {
           eat();
-          return Token.AT; // what about frac, etc.?
-
-        case '0':
-          {
-            readFrom();
-            eat();
-            switch (ch) {
-              case 'x':
-              case 'X':
-                eat();
-                return hexLiteral();
-              case 'b':
-              case 'B':
-                eat();
-                return boolLiteral();
-              case '0':
-              case '1':
-              case '2':
-              case '3':
-              case '4':
-              case '5':
-              case '6':
-              case '7':
-              case '_':
-                return octalLiteral();
-              case '.':
-                eat();
-                return floatLiteral();
-              case 'f':
-              case 'F':
-                eat();
-                return Token.FLOAT_LITERAL;
-              case 'd':
-              case 'D':
-                eat();
-                return Token.DOUBLE_LITERAL;
-              case 'l':
-              case 'L':
-                eat();
-                return Token.LONG_LITERAL;
-              default:
-                return Token.INT_LITERAL;
+          return Token.AT;
+          // what about frac, etc.?
+        }
+        case '0' -> {
+          readFrom();
+          eat();
+          return switch (ch) {
+            case 'x', 'X' -> {
+              eat();
+              yield hexLiteral();
             }
-          }
-        case '1':
-        case '2':
-        case '3':
-        case '4':
-        case '5':
-        case '6':
-        case '7':
-        case '8':
-        case '9':
+            case 'b', 'B' -> {
+              eat();
+              yield boolLiteral();
+            }
+            case '0', '1', '2', '3', '4', '5', '6', '7', '_' -> octalLiteral();
+            case '.' -> {
+              eat();
+              yield floatLiteral();
+            }
+            case 'f', 'F' -> {
+              eat();
+              yield Token.FLOAT_LITERAL;
+            }
+            case 'd', 'D' -> {
+              eat();
+              yield Token.DOUBLE_LITERAL;
+            }
+            case 'l', 'L' -> {
+              eat();
+              yield Token.LONG_LITERAL;
+            }
+            default -> Token.INT_LITERAL;
+          };
+        }
+        case '1', '2', '3', '4', '5', '6', '7', '8', '9' -> {
           readFrom();
           return decimalLiteral();
-        case '.':
-          {
-            readFrom();
-            eat();
-            switch (ch) {
-              case '.':
-                {
-                  eat();
-                  if (ch == '.') {
-                    eat();
-                    return Token.ELLIPSIS;
-                  } else {
-                    throw inputError();
-                  }
-                }
-              case '0':
-              case '1':
-              case '2':
-              case '3':
-              case '4':
-              case '5':
-              case '6':
-              case '7':
-              case '8':
-              case '9':
-                return floatLiteral();
-              default:
-                return Token.DOT;
+        }
+        case '.' -> {
+          readFrom();
+          eat();
+          return switch (ch) {
+            case '.' -> {
+              eat();
+              if (ch == '.') {
+                eat();
+                yield Token.ELLIPSIS;
+              } else {
+                throw inputError();
+              }
+            }
+            case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9' -> floatLiteral();
+            default -> Token.DOT;
+          };
+        }
+        case '\'' -> {
+          eat();
+          char value;
+          switch (ch) {
+            case '\\' -> {
+              eat();
+              value = escape();
+            }
+            case '\'' -> throw error(ErrorKind.EMPTY_CHARACTER_LITERAL);
+            default -> {
+              value = (char) ch;
+              eat();
             }
           }
-
-        case '\'':
-          {
+          if (ch == '\'') {
+            saveValue(String.valueOf(value));
             eat();
-            char value;
+            return Token.CHAR_LITERAL;
+          }
+          throw error(ErrorKind.UNTERMINATED_CHARACTER_LITERAL);
+        }
+        case '"' -> {
+          eat();
+          if (ch == '"') {
+            eat();
+            if (ch != '"') {
+              saveValue("");
+              return Token.STRING_LITERAL;
+            }
+            eat();
+            return textBlock();
+          }
+          readFrom();
+          StringBuilder sb = new StringBuilder();
+          STRING:
+          while (true) {
             switch (ch) {
               case '\\':
                 eat();
-                value = escape();
-                break;
-              case '\'':
-                throw error(ErrorKind.EMPTY_CHARACTER_LITERAL);
-              default:
-                value = (char) ch;
+                sb.append(escape());
+                continue STRING;
+              case '"':
+                saveValue(sb.toString());
                 eat();
-            }
-            if (ch == '\'') {
-              saveValue(String.valueOf(value));
-              eat();
-              return Token.CHAR_LITERAL;
-            }
-            throw error(ErrorKind.UNTERMINATED_CHARACTER_LITERAL);
-          }
-
-        case '"':
-          {
-            eat();
-            if (ch == '"') {
-              eat();
-              if (ch != '"') {
-                saveValue("");
                 return Token.STRING_LITERAL;
-              }
-              eat();
-              return textBlock();
-            }
-            readFrom();
-            StringBuilder sb = new StringBuilder();
-            STRING:
-            while (true) {
-              switch (ch) {
-                case '\\':
-                  eat();
-                  sb.append(escape());
-                  continue STRING;
-                case '"':
-                  saveValue(sb.toString());
-                  eat();
-                  return Token.STRING_LITERAL;
-                case '\n':
-                  throw error(ErrorKind.UNTERMINATED_STRING);
-                case ASCII_SUB:
-                  if (reader.done()) {
-                    return Token.EOF;
-                  }
-                  // falls through
-                default:
-                  sb.appendCodePoint(ch);
-                  eat();
-                  continue STRING;
-              }
+              case '\n':
+                throw error(ErrorKind.UNTERMINATED_STRING);
+              case ASCII_SUB:
+                if (reader.done()) {
+                  return Token.EOF;
+                }
+              // falls through
+              default:
+                sb.appendCodePoint(ch);
+                eat();
+                continue STRING;
             }
           }
-        default:
+        }
+        default -> {
           if (Character.isJavaIdentifierStart(ch)) {
             // TODO(cushon): the style guide disallows non-ascii identifiers
             return identifier();
           }
           throw inputError();
+        }
       }
     }
+  }
+
+  // the current token prefix is /*, the token is a JLS 3.7 traditional comment
+  private void traditionalComment() {
+    eat();
+    boolean sawStar = false;
+    boolean isJavadoc = false;
+    if (ch == '*') {
+      eat();
+      // handle empty non-javadoc comments: `/**/`
+      if (ch == '/') {
+        eat();
+        return;
+      }
+      isJavadoc = true;
+      readFrom();
+    }
+    // find the */ at the end of the comment
+    while (true) {
+      switch (ch) {
+        case '*' -> {
+          eat();
+          sawStar = true;
+        }
+        case '/' -> {
+          if (sawStar) {
+            if (isJavadoc) {
+              javadoc = TurbineJavadoc.traditional(position, reader.position(), source().source());
+            }
+            eat();
+            return;
+          }
+          eat();
+          sawStar = false;
+        }
+        case ASCII_SUB -> {
+          if (reader.done()) {
+            throw TurbineError.format(reader.source(), position, ErrorKind.UNCLOSED_COMMENT);
+          }
+          eat();
+          sawStar = false;
+        }
+        default -> {
+          eat();
+          sawStar = false;
+        }
+      }
+    }
+  }
+
+  // the current token prefix is ///, the token is a markdown javadoc line comment
+  private @Nullable Token markdownJavadoc() {
+    int startPosition = position;
+    // the first line of a markdown javadoc comment
+    while (true) {
+      position = reader.position();
+      switch (ch) {
+        case '\n', '\r' -> {
+          eat();
+          saveMarkdownJavadoc(startPosition);
+        }
+        case ASCII_SUB -> {
+          if (reader.done()) {
+            saveMarkdownJavadoc(startPosition);
+            return Token.EOF;
+          }
+          eat();
+          continue;
+        }
+        default -> {
+          eat();
+          continue;
+        }
+      }
+      break;
+    }
+    // accumulate the rest of the lines of a markdown javadoc comment
+    while (true) {
+      position = reader.position();
+      switch (ch) {
+        case ' ', '\t', '\f' -> eat();
+        case '/' -> {
+          eat();
+          switch (ch) {
+            case '/' -> {
+              eat();
+              switch (ch) {
+                case '/' -> {
+                  eat();
+                  // an additional line of markdown javadoc
+                  while (true) {
+                    switch (ch) {
+                      case '\n', '\r' -> {
+                        eat();
+                        saveMarkdownJavadoc(startPosition);
+                      }
+                      case ASCII_SUB -> {
+                        if (reader.done()) {
+                          saveMarkdownJavadoc(startPosition);
+                          return Token.EOF;
+                        }
+                        eat();
+                        continue;
+                      }
+                      default -> {
+                        eat();
+                        continue;
+                      }
+                    }
+                    break;
+                  }
+                }
+                // a trailing non-markdown line comment
+                default -> {
+                  return endOfLineComment();
+                }
+              }
+            }
+            case '*' -> {
+              traditionalComment();
+              return null;
+            }
+            // the token started with / but wasn't a comment
+            default -> {
+              if (ch == '=') {
+                eat();
+                return Token.DIVEQ;
+              }
+              return Token.DIV;
+            }
+          }
+        }
+        default -> {
+          return null;
+        }
+      }
+    }
+  }
+
+  // the current token prefix is //, the token is a JLS 3.7 end of line comment
+  private @Nullable Token endOfLineComment() {
+    while (true) {
+      switch (ch) {
+        case '\n', '\r' -> {
+          eat();
+          return null;
+        }
+        case ASCII_SUB -> {
+          if (reader.done()) {
+            return Token.EOF;
+          }
+          eat();
+        }
+        default -> eat();
+      }
+    }
+  }
+
+  // Update `javadoc` to be the span of lines up to here.
+  private void saveMarkdownJavadoc(int startPosition) {
+    javadoc = TurbineJavadoc.markdown(startPosition, reader.position(), source().source());
   }
 
   private Token textBlock() {
     OUTER:
     while (true) {
       switch (ch) {
-        case ' ':
-        case '\r':
-        case '\t':
-          eat();
-          break;
-        default:
+        case ' ', '\r', '\t' -> eat();
+        default -> {
           break OUTER;
+        }
       }
     }
     switch (ch) {
-      case '\r':
+      case '\r' -> {
         eat();
         if (ch == '\n') {
           eat();
         }
-        break;
-      case '\n':
-        eat();
-        break;
-      default:
-        throw inputError();
+      }
+      case '\n' -> eat();
+      default -> throw inputError();
     }
     readFrom();
     StringBuilder sb = new StringBuilder();
@@ -512,7 +568,7 @@ public class StreamLexer implements Lexer {
           if (reader.done()) {
             return Token.EOF;
           }
-          // falls through
+        // falls through
         default:
           sb.appendCodePoint(ch);
           eat();
@@ -602,34 +658,36 @@ public class StreamLexer implements Lexer {
   }
 
   private String translateEscapes() {
-    readFrom();
     StringBuilder sb = new StringBuilder();
     OUTER:
     while (true) {
       switch (ch) {
-        case '\\':
+        case '\\' -> {
           eat();
           switch (ch) {
-            case '\r':
+            case '\r' -> {
               eat();
               if (ch == '\n') {
                 eat();
               }
-              break;
-            case '\n':
+            }
+            case '\n' -> {
               eat();
-              break;
-            default:
+            }
+            default -> {
               sb.append(escape());
-              break;
+            }
           }
           continue;
-        case ASCII_SUB:
+        }
+        case ASCII_SUB -> {
           break OUTER;
-        default:
+        }
+        default -> {
           sb.appendCodePoint(ch);
           eat();
           continue;
+        }
       }
     }
     return sb.toString();
@@ -665,53 +723,31 @@ public class StreamLexer implements Lexer {
       case '\\':
         eat();
         return '\\';
-      case '0':
-      case '1':
-      case '2':
-      case '3':
+      case '0', '1', '2', '3':
         zeroToThree = true;
-        // falls through
-      case '4':
-      case '5':
-      case '6':
-      case '7':
+      // falls through
+      case '4', '5', '6', '7':
         {
           char value = (char) (ch - '0');
           eat();
-          switch (ch) {
-            case '0':
-            case '1':
-            case '2':
-            case '3':
-            case '4':
-            case '5':
-            case '6':
-            case '7':
-              {
-                value = (char) ((value << 3) | (ch - '0'));
-                eat();
-                if (zeroToThree) {
-                  switch (ch) {
-                    case '0':
-                    case '1':
-                    case '2':
-                    case '3':
-                    case '4':
-                    case '5':
-                    case '6':
-                    case '7':
-                      value = (char) ((value << 3) | (ch - '0'));
-                      eat();
-                      return value;
-                    default:
-                      return value;
+          return switch (ch) {
+            case '0', '1', '2', '3', '4', '5', '6', '7' -> {
+              value = (char) ((value << 3) | (ch - '0'));
+              eat();
+              if (zeroToThree) {
+                yield switch (ch) {
+                  case '0', '1', '2', '3', '4', '5', '6', '7' -> {
+                    value = (char) ((value << 3) | (ch - '0'));
+                    eat();
+                    yield value;
                   }
-                }
+                  default -> value;
+                };
               }
-              // fall through
-            default:
-              return value;
-          }
+              yield value;
+            }
+            default -> value;
+          };
         }
       default:
         throw inputError();
@@ -720,39 +756,36 @@ public class StreamLexer implements Lexer {
 
   private Token decimalLiteral() {
     readDigits();
-    switch (ch) {
-      case 'e':
-      case 'E':
-        return floatLiteral();
-      case '.':
+    return switch (ch) {
+      case 'e', 'E' -> floatLiteral();
+      case '.' -> {
         eat();
-        return floatLiteral();
-      case 'f':
-      case 'F':
+        yield floatLiteral();
+      }
+      case 'f', 'F' -> {
         eat();
-        return Token.FLOAT_LITERAL;
-      case 'd':
-      case 'D':
+        yield Token.FLOAT_LITERAL;
+      }
+      case 'd', 'D' -> {
         eat();
-        return Token.DOUBLE_LITERAL;
-      case 'l':
-      case 'L':
+        yield Token.DOUBLE_LITERAL;
+      }
+      case 'l', 'L' -> {
         eat();
-        return Token.LONG_LITERAL;
-      default:
-        return Token.INT_LITERAL;
-    }
+        yield Token.LONG_LITERAL;
+      }
+      default -> Token.INT_LITERAL;
+    };
   }
 
   private Token hexFloatLiteral() {
     readHexDigits();
     switch (ch) {
-      case 'p':
-      case 'P':
+      case 'p', 'P' -> {
         eat();
         signedInteger();
-        break;
-      default: // fall out
+      }
+      default -> {}
     }
     return floatTypeSuffix();
   }
@@ -762,134 +795,125 @@ public class StreamLexer implements Lexer {
       readDigits();
     }
     switch (ch) {
-      case 'e':
-      case 'E':
+      case 'e', 'E' -> {
         eat();
         signedInteger();
-        break;
-      default: // fall out
+      }
+      default -> {}
     }
     return floatTypeSuffix();
   }
 
   private Token floatTypeSuffix() {
-    switch (ch) {
-      case 'd':
-      case 'D':
+    return switch (ch) {
+      case 'd', 'D' -> {
         eat();
-        return Token.DOUBLE_LITERAL;
-      case 'f':
-      case 'F':
+        yield Token.DOUBLE_LITERAL;
+      }
+      case 'f', 'F' -> {
         eat();
-        return Token.FLOAT_LITERAL;
-      default:
-        return Token.DOUBLE_LITERAL;
-    }
+        yield Token.FLOAT_LITERAL;
+      }
+      default -> Token.DOUBLE_LITERAL;
+    };
   }
 
   private void signedInteger() {
     switch (ch) {
-      case '-':
-      case '+':
-        eat();
-        break;
-      default:
-        break;
+      case '-', '+' -> eat();
+      default -> {}
     }
     readDigits();
   }
 
   private void readHexDigits() {
     switch (ch) {
-      case 'A':
-      case 'B':
-      case 'C':
-      case 'D':
-      case 'E':
-      case 'F':
-      case 'a':
-      case 'b':
-      case 'c':
-      case 'd':
-      case 'e':
-      case 'f':
-      case '0':
-      case '1':
-      case '2':
-      case '3':
-      case '4':
-      case '5':
-      case '6':
-      case '7':
-      case '8':
-      case '9':
-        eat();
-        break;
-      default:
-        throw inputError();
+      case 'A',
+          'B',
+          'C',
+          'D',
+          'E',
+          'F',
+          'a',
+          'b',
+          'c',
+          'd',
+          'e',
+          'f',
+          '0',
+          '1',
+          '2',
+          '3',
+          '4',
+          '5',
+          '6',
+          '7',
+          '8',
+          '9' ->
+          eat();
+      default -> throw inputError();
     }
     OUTER:
     while (true) {
       switch (ch) {
-        case '_':
-          {
-            do {
-              eat();
-            } while (ch == '_');
-            switch (ch) {
-              case 'A':
-              case 'B':
-              case 'C':
-              case 'D':
-              case 'E':
-              case 'F':
-              case 'a':
-              case 'b':
-              case 'c':
-              case 'd':
-              case 'e':
-              case 'f':
-              case '0':
-              case '1':
-              case '2':
-              case '3':
-              case '4':
-              case '5':
-              case '6':
-              case '7':
-              case '8':
-              case '9':
-                continue OUTER;
-              default:
-                throw inputError();
+        case '_' -> {
+          do {
+            eat();
+          } while (ch == '_');
+          switch (ch) {
+            case 'A',
+                'B',
+                'C',
+                'D',
+                'E',
+                'F',
+                'a',
+                'b',
+                'c',
+                'd',
+                'e',
+                'f',
+                '0',
+                '1',
+                '2',
+                '3',
+                '4',
+                '5',
+                '6',
+                '7',
+                '8',
+                '9' -> {
+              continue OUTER;
             }
+            default -> throw inputError();
           }
-        case 'A':
-        case 'B':
-        case 'C':
-        case 'D':
-        case 'E':
-        case 'F':
-        case 'a':
-        case 'b':
-        case 'c':
-        case 'd':
-        case 'e':
-        case 'f':
-        case '0':
-        case '1':
-        case '2':
-        case '3':
-        case '4':
-        case '5':
-        case '6':
-        case '7':
-        case '8':
-        case '9':
-          eat();
-          break;
-        default:
+        }
+        case 'A',
+            'B',
+            'C',
+            'D',
+            'E',
+            'F',
+            'a',
+            'b',
+            'c',
+            'd',
+            'e',
+            'f',
+            '0',
+            '1',
+            '2',
+            '3',
+            '4',
+            '5',
+            '6',
+            '7',
+            '8',
+            '9' ->
+            eat();
+        default -> {
           return;
+        }
       }
     }
   }
@@ -903,7 +927,7 @@ public class StreamLexer implements Lexer {
     OUTER:
     while (true) {
       switch (ch) {
-        case '_':
+        case '_' -> {
           do {
             eat();
           } while (ch == '_');
@@ -912,156 +936,123 @@ public class StreamLexer implements Lexer {
           } else {
             throw inputError();
           }
-        case '0':
-        case '1':
-        case '2':
-        case '3':
-        case '4':
-        case '5':
-        case '6':
-        case '7':
-        case '8':
-        case '9':
+        }
+        case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9' -> {
           eat();
           continue OUTER;
-        default:
+        }
+        default -> {
           return;
+        }
       }
     }
   }
 
   private Token boolLiteral() {
     readBinaryDigits();
-    switch (ch) {
-      case 'l':
-      case 'L':
+    return switch (ch) {
+      case 'l', 'L' -> {
         eat();
-        return Token.LONG_LITERAL;
-      default:
-        return Token.INT_LITERAL;
-    }
+        yield Token.LONG_LITERAL;
+      }
+      default -> Token.INT_LITERAL;
+    };
   }
 
   private void readBinaryDigits() {
     switch (ch) {
-      case '0':
-      case '1':
-        eat();
-        break;
-      default:
-        throw inputError();
+      case '0', '1' -> eat();
+      default -> throw inputError();
     }
     OUTER:
     while (true) {
       switch (ch) {
-        case '_':
+        case '_' -> {
           do {
             eat();
           } while (ch == '_');
           switch (ch) {
-            case '0':
-            case '1':
+            case '0', '1' -> {
               continue OUTER;
-            default:
-              throw inputError();
+            }
+            default -> throw inputError();
           }
-        case '0':
-        case '1':
+        }
+        case '0', '1' -> {
           eat();
           continue OUTER;
-        default:
+        }
+        default -> {
           return;
+        }
       }
     }
   }
 
   private Token octalLiteral() {
     readOctalDigits();
-    switch (ch) {
-      case 'l':
-      case 'L':
+    return switch (ch) {
+      case 'l', 'L' -> {
         eat();
-        return Token.LONG_LITERAL;
-      default:
-        return Token.INT_LITERAL;
-    }
+        yield Token.LONG_LITERAL;
+      }
+      default -> Token.INT_LITERAL;
+    };
   }
 
   private void readOctalDigits() {
     switch (ch) {
-      case '0':
-      case '1':
-      case '2':
-      case '3':
-      case '4':
-      case '5':
-      case '6':
-      case '7':
-      case '_':
-        eat();
-        break;
-      default:
-        throw inputError();
+      case '0', '1', '2', '3', '4', '5', '6', '7', '_' -> eat();
+      default -> throw inputError();
     }
     OUTER:
     while (true) {
       switch (ch) {
-        case '_':
+        case '_' -> {
           do {
             eat();
           } while (ch == '_');
           switch (ch) {
-            case '0':
-            case '1':
-            case '2':
-            case '3':
-            case '4':
-            case '5':
-            case '6':
-            case '7':
+            case '0', '1', '2', '3', '4', '5', '6', '7' -> {
               continue OUTER;
-            default:
-              throw inputError();
+            }
+            default -> throw inputError();
           }
-        case '0':
-        case '1':
-        case '2':
-        case '3':
-        case '4':
-        case '5':
-        case '6':
-        case '7':
+        }
+        case '0', '1', '2', '3', '4', '5', '6', '7' -> {
           eat();
           continue OUTER;
-        default:
+        }
+        default -> {
           return;
+        }
       }
     }
   }
 
   private Token hexLiteral() {
     readHexDigits();
-    switch (ch) {
-      case '.':
+    return switch (ch) {
+      case '.' -> {
         eat();
-        return hexFloatLiteral();
-      case 'l':
-      case 'L':
+        yield hexFloatLiteral();
+      }
+      case 'l', 'L' -> {
         eat();
-        return Token.LONG_LITERAL;
-      case 'p':
-      case 'P':
+        yield Token.LONG_LITERAL;
+      }
+      case 'p', 'P' -> {
         eat();
         signedInteger();
-        return floatTypeSuffix();
-      default:
-        return Token.INT_LITERAL;
-    }
+        yield floatTypeSuffix();
+      }
+      default -> Token.INT_LITERAL;
+    };
   }
 
   private Token operator() {
     switch (ch) {
-      case '=':
+      case '=' -> {
         eat();
         if (ch == '=') {
           eat();
@@ -1069,50 +1060,56 @@ public class StreamLexer implements Lexer {
         } else {
           return Token.ASSIGN;
         }
-      case '>':
+      }
+      case '>' -> {
         eat();
-        switch (ch) {
-          case '=':
+        return switch (ch) {
+          case '=' -> {
             eat();
-            return Token.GTE;
-          case '>':
+            yield Token.GTE;
+          }
+          case '>' -> {
             eat();
-            switch (ch) {
-              case '>':
+            yield switch (ch) {
+              case '>' -> {
                 eat();
                 if (ch == '=') {
                   eat();
-                  return Token.GTGTGTE;
+                  yield Token.GTGTGTE;
                 } else {
-                  return Token.GTGTGT;
+                  yield Token.GTGTGT;
                 }
-              case '=':
+              }
+              case '=' -> {
                 eat();
-                return Token.GTGTE;
-              default:
-                return Token.GTGT;
-            }
-          default:
-            return Token.GT;
-        }
-      case '<':
+                yield Token.GTGTE;
+              }
+              default -> Token.GTGT;
+            };
+          }
+          default -> Token.GT;
+        };
+      }
+      case '<' -> {
         eat();
-        switch (ch) {
-          case '=':
+        return switch (ch) {
+          case '=' -> {
             eat();
-            return Token.LTE;
-          case '<':
+            yield Token.LTE;
+          }
+          case '<' -> {
             eat();
             if (ch == '=') {
               eat();
-              return Token.LTLTE;
+              yield Token.LTLTE;
             } else {
-              return Token.LTLT;
+              yield Token.LTLT;
             }
-          default:
-            return Token.LT;
-        }
-      case '!':
+          }
+          default -> Token.LT;
+        };
+      }
+      case '!' -> {
         eat();
         if (ch == '=') {
           eat();
@@ -1120,13 +1117,16 @@ public class StreamLexer implements Lexer {
         } else {
           return Token.NOT;
         }
-      case '~':
+      }
+      case '~' -> {
         eat();
         return Token.TILDE;
-      case '?':
+      }
+      case '?' -> {
         eat();
         return Token.COND;
-      case ':':
+      }
+      case ':' -> {
         eat();
         if (ch == ':') {
           eat();
@@ -1134,58 +1134,68 @@ public class StreamLexer implements Lexer {
         } else {
           return Token.COLON;
         }
-      case '-':
+      }
+      case '-' -> {
         eat();
-        switch (ch) {
-          case '>':
+        return switch (ch) {
+          case '>' -> {
             eat();
-            return Token.ARROW;
-          case '-':
+            yield Token.ARROW;
+          }
+          case '-' -> {
             eat();
-            return Token.DECR;
-          case '=':
+            yield Token.DECR;
+          }
+          case '=' -> {
             eat();
-            return Token.MINUSEQ;
-          default:
-            return Token.MINUS;
-        }
-      case '&':
+            yield Token.MINUSEQ;
+          }
+          default -> Token.MINUS;
+        };
+      }
+      case '&' -> {
         eat();
-        switch (ch) {
-          case '&':
+        return switch (ch) {
+          case '&' -> {
             eat();
-            return Token.ANDAND;
-          case '=':
+            yield Token.ANDAND;
+          }
+          case '=' -> {
             eat();
-            return Token.ANDEQ;
-          default:
-            return Token.AND;
-        }
-      case '|':
+            yield Token.ANDEQ;
+          }
+          default -> Token.AND;
+        };
+      }
+      case '|' -> {
         eat();
-        switch (ch) {
-          case '=':
+        return switch (ch) {
+          case '=' -> {
             eat();
-            return Token.OREQ;
-          case '|':
+            yield Token.OREQ;
+          }
+          case '|' -> {
             eat();
-            return Token.OROR;
-          default:
-            return Token.OR;
-        }
-      case '+':
+            yield Token.OROR;
+          }
+          default -> Token.OR;
+        };
+      }
+      case '+' -> {
         eat();
-        switch (ch) {
-          case '+':
+        return switch (ch) {
+          case '+' -> {
             eat();
-            return Token.INCR;
-          case '=':
+            yield Token.INCR;
+          }
+          case '=' -> {
             eat();
-            return Token.PLUSEQ;
-          default:
-            return Token.PLUS;
-        }
-      case '*':
+            yield Token.PLUSEQ;
+          }
+          default -> Token.PLUS;
+        };
+      }
+      case '*' -> {
         eat();
         if (ch == '=') {
           eat();
@@ -1193,11 +1203,11 @@ public class StreamLexer implements Lexer {
         } else {
           return Token.MULT;
         }
-      case '/':
-        // handled with comments
-        throw inputError();
-
-      case '%':
+      }
+      case '/' ->
+          // handled with comments
+          throw inputError();
+      case '%' -> {
         eat();
         if (ch == '=') {
           eat();
@@ -1205,7 +1215,8 @@ public class StreamLexer implements Lexer {
         } else {
           return Token.MOD;
         }
-      case '^':
+      }
+      case '^' -> {
         eat();
         if (ch == '=') {
           eat();
@@ -1213,8 +1224,8 @@ public class StreamLexer implements Lexer {
         } else {
           return Token.XOR;
         }
-      default:
-        throw inputError();
+      }
+      default -> throw inputError();
     }
   }
 
@@ -1232,116 +1243,62 @@ public class StreamLexer implements Lexer {
   }
 
   private static Token makeIdent(String s) {
-    switch (s) {
-      case "abstract":
-        return Token.ABSTRACT;
-      case "assert":
-        return Token.ASSERT;
-      case "boolean":
-        return Token.BOOLEAN;
-      case "break":
-        return Token.BREAK;
-      case "byte":
-        return Token.BYTE;
-      case "case":
-        return Token.CASE;
-      case "catch":
-        return Token.CATCH;
-      case "char":
-        return Token.CHAR;
-      case "class":
-        return Token.CLASS;
-      case "const":
-        return Token.CONST;
-      case "continue":
-        return Token.CONTINUE;
-      case "default":
-        return Token.DEFAULT;
-      case "do":
-        return Token.DO;
-      case "double":
-        return Token.DOUBLE;
-      case "else":
-        return Token.ELSE;
-      case "enum":
-        return Token.ENUM;
-      case "extends":
-        return Token.EXTENDS;
-      case "final":
-        return Token.FINAL;
-      case "finally":
-        return Token.FINALLY;
-      case "float":
-        return Token.FLOAT;
-      case "for":
-        return Token.FOR;
-      case "goto":
-        return Token.GOTO;
-      case "if":
-        return Token.IF;
-      case "implements":
-        return Token.IMPLEMENTS;
-      case "import":
-        return Token.IMPORT;
-      case "instanceof":
-        return Token.INSTANCEOF;
-      case "int":
-        return Token.INT;
-      case "interface":
-        return Token.INTERFACE;
-      case "long":
-        return Token.LONG;
-      case "native":
-        return Token.NATIVE;
-      case "new":
-        return Token.NEW;
-      case "package":
-        return Token.PACKAGE;
-      case "private":
-        return Token.PRIVATE;
-      case "protected":
-        return Token.PROTECTED;
-      case "public":
-        return Token.PUBLIC;
-      case "return":
-        return Token.RETURN;
-      case "short":
-        return Token.SHORT;
-      case "static":
-        return Token.STATIC;
-      case "strictfp":
-        return Token.STRICTFP;
-      case "super":
-        return Token.SUPER;
-      case "switch":
-        return Token.SWITCH;
-      case "synchronized":
-        return Token.SYNCHRONIZED;
-      case "this":
-        return Token.THIS;
-      case "throw":
-        return Token.THROW;
-      case "throws":
-        return Token.THROWS;
-      case "transient":
-        return Token.TRANSIENT;
-      case "try":
-        return Token.TRY;
-      case "void":
-        return Token.VOID;
-      case "volatile":
-        return Token.VOLATILE;
-      case "while":
-        return Token.WHILE;
-      case "true":
-        return Token.TRUE;
-      case "false":
-        return Token.FALSE;
-      case "null":
-        return Token.NULL;
-      default:
-        return Token.IDENT;
-    }
+    return switch (s) {
+      case "abstract" -> Token.ABSTRACT;
+      case "assert" -> Token.ASSERT;
+      case "boolean" -> Token.BOOLEAN;
+      case "break" -> Token.BREAK;
+      case "byte" -> Token.BYTE;
+      case "case" -> Token.CASE;
+      case "catch" -> Token.CATCH;
+      case "char" -> Token.CHAR;
+      case "class" -> Token.CLASS;
+      case "const" -> Token.CONST;
+      case "continue" -> Token.CONTINUE;
+      case "default" -> Token.DEFAULT;
+      case "do" -> Token.DO;
+      case "double" -> Token.DOUBLE;
+      case "else" -> Token.ELSE;
+      case "enum" -> Token.ENUM;
+      case "extends" -> Token.EXTENDS;
+      case "final" -> Token.FINAL;
+      case "finally" -> Token.FINALLY;
+      case "float" -> Token.FLOAT;
+      case "for" -> Token.FOR;
+      case "goto" -> Token.GOTO;
+      case "if" -> Token.IF;
+      case "implements" -> Token.IMPLEMENTS;
+      case "import" -> Token.IMPORT;
+      case "instanceof" -> Token.INSTANCEOF;
+      case "int" -> Token.INT;
+      case "interface" -> Token.INTERFACE;
+      case "long" -> Token.LONG;
+      case "native" -> Token.NATIVE;
+      case "new" -> Token.NEW;
+      case "package" -> Token.PACKAGE;
+      case "private" -> Token.PRIVATE;
+      case "protected" -> Token.PROTECTED;
+      case "public" -> Token.PUBLIC;
+      case "return" -> Token.RETURN;
+      case "short" -> Token.SHORT;
+      case "static" -> Token.STATIC;
+      case "strictfp" -> Token.STRICTFP;
+      case "super" -> Token.SUPER;
+      case "switch" -> Token.SWITCH;
+      case "synchronized" -> Token.SYNCHRONIZED;
+      case "this" -> Token.THIS;
+      case "throw" -> Token.THROW;
+      case "throws" -> Token.THROWS;
+      case "transient" -> Token.TRANSIENT;
+      case "try" -> Token.TRY;
+      case "void" -> Token.VOID;
+      case "volatile" -> Token.VOLATILE;
+      case "while" -> Token.WHILE;
+      case "true" -> Token.TRUE;
+      case "false" -> Token.FALSE;
+      case "null" -> Token.NULL;
+      default -> Token.IDENT;
+    };
   }
 
   private TurbineError inputError() {

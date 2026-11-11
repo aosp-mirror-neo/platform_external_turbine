@@ -17,14 +17,18 @@
 package com.google.turbine.main;
 
 import static com.google.common.base.StandardSystemProperty.JAVA_SPECIFICATION_VERSION;
+import static com.google.common.util.concurrent.MoreExecutors.listeningDecorator;
+import static com.google.common.util.concurrent.MoreExecutors.newDirectExecutorService;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
+import static java.util.concurrent.Executors.newFixedThreadPool;
 
 import com.google.auto.value.AutoValue;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.hash.Hashing;
-import com.google.common.io.MoreFiles;
+import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import com.google.turbine.binder.Binder;
 import com.google.turbine.binder.Binder.BindingResult;
@@ -45,6 +49,7 @@ import com.google.turbine.lower.Lower.Lowered;
 import com.google.turbine.options.TurbineOptions;
 import com.google.turbine.options.TurbineOptions.ReducedClasspathMode;
 import com.google.turbine.options.TurbineOptionsParser;
+import com.google.turbine.parallel.Parallel;
 import com.google.turbine.parse.Parser;
 import com.google.turbine.proto.DepsProto;
 import com.google.turbine.proto.ManifestProto;
@@ -57,10 +62,11 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
@@ -82,6 +88,7 @@ public final class Main {
   static final String MANIFEST_NAME = JarFile.MANIFEST_NAME;
   static final Attributes.Name TARGET_LABEL = new Attributes.Name("Target-Label");
   static final Attributes.Name INJECTING_RULE_KIND = new Attributes.Name("Injecting-Rule-Kind");
+  static final Attributes.Name ORIGINAL_JAR_PATH = new Attributes.Name("Original-Jar-Path");
 
   public static void main(String[] args) {
     boolean ok;
@@ -137,7 +144,19 @@ public final class Main {
   public static Result compile(TurbineOptions options) throws IOException {
     usage(options);
 
-    ImmutableList<CompUnit> units = parseAll(options);
+    boolean parallel = options.parallel() && !options.javacOpts().contains("-XDnoParallel");
+    try (ListeningExecutorService executor =
+        listeningDecorator(
+            parallel
+                ? newFixedThreadPool(Runtime.getRuntime().availableProcessors())
+                : newDirectExecutorService())) {
+      return compile(options, executor);
+    }
+  }
+
+  private static Result compile(TurbineOptions options, ListeningExecutorService executor)
+      throws IOException {
+    ImmutableList<CompUnit> units = parseAll(executor, options);
 
     ClassPath bootclasspath = bootclasspath(options);
 
@@ -154,29 +173,27 @@ public final class Main {
     int transitiveClasspathLength = classPath.size();
     int reducedClasspathLength = classPath.size();
     switch (reducedClasspathMode) {
-      case NONE:
-        bound = bind(options, units, bootclasspath, classPath);
-        break;
-      case BAZEL_FALLBACK:
+      case NONE -> bound = bind(executor, options, units, bootclasspath, classPath);
+      case BAZEL_FALLBACK -> {
         reducedClasspathLength = options.reducedClasspathLength();
-        bound = bind(options, units, bootclasspath, classPath);
+        bound = bind(executor, options, units, bootclasspath, classPath);
         transitiveClasspathFallback = true;
-        break;
-      case JAVABUILDER_REDUCED:
+      }
+      case JAVABUILDER_REDUCED -> {
         Collection<String> reducedClasspath =
             Dependencies.reduceClasspath(classPath, options.directJars(), options.depsArtifacts());
         reducedClasspathLength = reducedClasspath.size();
         try {
-          bound = bind(options, units, bootclasspath, reducedClasspath);
+          bound = bind(executor, options, units, bootclasspath, reducedClasspath);
         } catch (TurbineError e) {
-          bound = fallback(options, units, bootclasspath, classPath);
+          bound = fallback(executor, options, units, bootclasspath, classPath);
           transitiveClasspathFallback = true;
         }
-        break;
-      case BAZEL_REDUCED:
+      }
+      case BAZEL_REDUCED -> {
         transitiveClasspathLength = options.fullClasspathLength();
         try {
-          bound = bind(options, units, bootclasspath, classPath);
+          bound = bind(executor, options, units, bootclasspath, classPath);
         } catch (TurbineError e) {
           writeJdepsForFallback(options);
           return Result.create(
@@ -185,20 +202,20 @@ public final class Main {
               /* reducedClasspathLength= */ reducedClasspathLength,
               Statistics.empty());
         }
-        break;
-      default:
-        throw new AssertionError(reducedClasspathMode);
+      }
+      default -> throw new AssertionError(reducedClasspathMode);
     }
 
     if (options.outputDeps().isPresent()
+        || options.headerCompilationOutput().isPresent()
         || options.output().isPresent()
         || options.outputManifest().isPresent()) {
-      // TODO(cushon): parallelize
       Lowered lowered =
           Lower.lowerAll(
+              executor,
               Lower.LowerOptions.builder()
                   .languageVersion(options.languageVersion())
-                  .emitPrivateFields(options.javacOpts().contains("-XDturbine.emitPrivateFields"))
+                  .javacOpts(options.javacOpts())
                   .build(),
               bound.units(),
               bound.modules(),
@@ -207,7 +224,7 @@ public final class Main {
       if (options.outputDeps().isPresent()) {
         DepsProto.Dependencies deps =
             Dependencies.collectDeps(options.targetLabel(), bootclasspath, bound, lowered);
-        Path path = Paths.get(options.outputDeps().get());
+        Path path = Path.of(options.outputDeps().get());
         /*
          * TODO: cpovirk - Consider checking outputDeps for validity earlier so that anyone who
          * `--output_deps=/` or similar will get a proper error instead of NPE.
@@ -218,8 +235,16 @@ public final class Main {
         }
       }
       if (options.output().isPresent()) {
-        ImmutableMap<String, byte[]> transitive = Transitive.collectDeps(bootclasspath, bound);
+        ImmutableMap<String, byte[]> transitive =
+            options.headerCompilationOutput().isPresent()
+                ? ImmutableMap.of()
+                : Transitive.collectDeps(bootclasspath, bound);
         writeOutput(options, bound.generatedClasses(), lowered.bytes(), transitive);
+      }
+      if (options.headerCompilationOutput().isPresent()) {
+        ImmutableMap<String, byte[]> trimmed = Transitive.trimOutput(lowered.bytes());
+        ImmutableMap<String, byte[]> transitive = Transitive.collectDeps(bootclasspath, bound);
+        writeHeaderCompilationOutput(options, trimmed, transitive);
       }
       if (options.outputManifest().isPresent()) {
         writeManifestProto(options, bound.units(), bound.generatedSources());
@@ -237,12 +262,13 @@ public final class Main {
 
   // don't inline this; we want it to show up in profiles
   private static BindingResult fallback(
+      ListeningExecutorService executor,
       TurbineOptions options,
       ImmutableList<CompUnit> units,
       ClassPath bootclasspath,
       ImmutableList<String> classPath)
       throws IOException {
-    return bind(options, units, bootclasspath, classPath);
+    return bind(executor, options, units, bootclasspath, classPath);
   }
 
   /**
@@ -252,7 +278,7 @@ public final class Main {
    */
   public static void writeJdepsForFallback(TurbineOptions options) throws IOException {
     try (OutputStream os =
-        new BufferedOutputStream(Files.newOutputStream(Paths.get(options.outputDeps().get())))) {
+        new BufferedOutputStream(Files.newOutputStream(Path.of(options.outputDeps().get())))) {
       DepsProto.Dependencies.newBuilder()
           .setRuleLabel(options.targetLabel().get())
           .setRequiresReducedClasspathFallback(true)
@@ -262,12 +288,14 @@ public final class Main {
   }
 
   private static BindingResult bind(
+      ListeningExecutorService executor,
       TurbineOptions options,
       ImmutableList<CompUnit> units,
       ClassPath bootclasspath,
       Collection<String> classpath)
       throws IOException {
     return Binder.bind(
+        executor,
         units,
         ClassPathBinder.bindClasspath(toPaths(classpath)),
         Processing.initializeProcessors(
@@ -285,9 +313,9 @@ public final class Main {
     if (options.help()) {
       throw new UsageException();
     }
-    if (!options.output().isPresent()
-        && !options.gensrcOutput().isPresent()
-        && !options.resourceOutput().isPresent()) {
+    if (options.output().isEmpty()
+        && options.gensrcOutput().isEmpty()
+        && options.resourceOutput().isEmpty()) {
       throw new UsageException(
           "at least one of --output, --gensrc_output, or --resource_output is required");
     }
@@ -327,40 +355,45 @@ public final class Main {
   }
 
   /** Parse all source files and source jars. */
-  // TODO(cushon): parallelize
-  private static ImmutableList<CompUnit> parseAll(TurbineOptions options) throws IOException {
-    return parseAll(options.sources(), options.sourceJars());
+  private static ImmutableList<CompUnit> parseAll(
+      ListeningExecutorService executor, TurbineOptions options) throws IOException {
+    return parseAll(executor, options.sources(), options.sourceJars());
   }
 
-  static ImmutableList<CompUnit> parseAll(Iterable<String> sources, Iterable<String> sourceJars)
+  static ImmutableList<CompUnit> parseAll(
+      ListeningExecutorService executor, Iterable<String> sources, Iterable<String> sourceJars)
       throws IOException {
-    ImmutableList.Builder<CompUnit> units = ImmutableList.builder();
+    List<SourceFile> sourceFiles = new ArrayList<>();
     for (String source : sources) {
-      Path path = Paths.get(source);
-      units.add(Parser.parse(new SourceFile(source, MoreFiles.asCharSource(path, UTF_8).read())));
+      Path path = Path.of(source);
+      sourceFiles.add(new SourceFile(source, Files.readString(path, UTF_8)));
     }
     for (String sourceJar : sourceJars) {
-      try (Zip.ZipIterable iterable = new Zip.ZipIterable(Paths.get(sourceJar))) {
+      try (Zip.ZipIterable iterable = new Zip.ZipIterable(Path.of(sourceJar))) {
         for (Zip.Entry ze : iterable) {
           if (ze.name().endsWith(".java")) {
             String name = ze.name();
             String source = new String(ze.data(), UTF_8);
-            units.add(Parser.parse(new SourceFile(name, source)));
+            sourceFiles.add(new SourceFile(name, source));
           }
         }
       }
     }
-    return units.build();
+    List<ListenableFuture<CompUnit>> futures = new ArrayList<>();
+    for (SourceFile sourceFile : sourceFiles) {
+      futures.add(executor.submit(() -> Parser.parse(sourceFile)));
+    }
+    return Parallel.allAsList(futures);
   }
 
   /** Writes source files generated by annotation processors. */
   private static void writeSources(
       TurbineOptions options, ImmutableMap<String, SourceFile> generatedSources)
       throws IOException {
-    if (!options.gensrcOutput().isPresent()) {
+    if (options.gensrcOutput().isEmpty()) {
       return;
     }
-    Path path = Paths.get(options.gensrcOutput().get());
+    Path path = Path.of(options.gensrcOutput().get());
     if (Files.isDirectory(path)) {
       for (SourceFile source : generatedSources.values()) {
         Path to = path.resolve(source.path());
@@ -383,10 +416,10 @@ public final class Main {
   /** Writes resource files generated by annotation processors. */
   private static void writeResources(
       TurbineOptions options, ImmutableMap<String, byte[]> generatedResources) throws IOException {
-    if (!options.resourceOutput().isPresent()) {
+    if (options.resourceOutput().isEmpty()) {
       return;
     }
-    Path path = Paths.get(options.resourceOutput().get());
+    Path path = Path.of(options.resourceOutput().get());
     if (Files.isDirectory(path)) {
       for (Map.Entry<String, byte[]> resource : generatedResources.entrySet()) {
         Path to = path.resolve(resource.getKey());
@@ -412,7 +445,7 @@ public final class Main {
       Map<String, byte[]> lowered,
       Map<String, byte[]> transitive)
       throws IOException {
-    Path path = Paths.get(options.output().get());
+    Path path = Path.of(options.output().get());
     try (OutputStream os = Files.newOutputStream(path);
         BufferedOutputStream bos = new BufferedOutputStream(os, BUFFER_SIZE);
         JarOutputStream jos = new JarOutputStream(bos)) {
@@ -434,6 +467,31 @@ public final class Main {
     }
   }
 
+  private static void writeHeaderCompilationOutput(
+      TurbineOptions options, Map<String, byte[]> trimmed, Map<String, byte[]> transitive)
+      throws IOException {
+    Path path = Path.of(options.headerCompilationOutput().get());
+    try (OutputStream os = Files.newOutputStream(path);
+        BufferedOutputStream bos = new BufferedOutputStream(os, BUFFER_SIZE);
+        JarOutputStream jos = new JarOutputStream(bos)) {
+      Manifest manifest = manifest();
+      Attributes attributes = manifest.getMainAttributes();
+      if (options.output().isPresent()) {
+        attributes.put(ORIGINAL_JAR_PATH, options.output().get());
+      }
+      writeManifest(jos, manifest);
+      for (Map.Entry<String, byte[]> entry : transitive.entrySet()) {
+        addEntry(
+            jos,
+            ClassPathBinder.TRANSITIVE_PREFIX + entry.getKey() + ClassPathBinder.TRANSITIVE_SUFFIX,
+            entry.getValue());
+      }
+      for (Map.Entry<String, byte[]> entry : trimmed.entrySet()) {
+        addEntry(jos, entry.getKey() + ".class", entry.getValue());
+      }
+    }
+  }
+
   private static void writeManifestProto(
       TurbineOptions options,
       ImmutableMap<ClassSymbol, SourceTypeBoundClass> units,
@@ -451,8 +509,7 @@ public final class Main {
               .build());
     }
     try (OutputStream os =
-        new BufferedOutputStream(
-            Files.newOutputStream(Paths.get(options.outputManifest().get())))) {
+        new BufferedOutputStream(Files.newOutputStream(Path.of(options.outputManifest().get())))) {
       manifest.build().writeTo(os);
     }
   }
@@ -505,7 +562,7 @@ public final class Main {
   private static ImmutableList<Path> toPaths(Iterable<String> paths) {
     ImmutableList.Builder<Path> result = ImmutableList.builder();
     for (String path : paths) {
-      result.add(Paths.get(path));
+      result.add(Path.of(path));
     }
     return result.build();
   }

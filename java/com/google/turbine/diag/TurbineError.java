@@ -46,6 +46,7 @@ public class TurbineError extends Error {
     INVALID_ANNOTATION_ARGUMENT("invalid annotation argument"),
     MISSING_ANNOTATION_ARGUMENT("missing required annotation argument: %s"),
     CANNOT_RESOLVE("could not resolve %s"),
+    CANNOT_RESOLVE_FIELD("could not resolve field %s"),
     EXPRESSION_ERROR("could not evaluate constant expression"),
     OPERAND_TYPE("bad operand type %s"),
     TYPE_CONVERSION("value %s of type %s cannot be converted to %s"),
@@ -57,9 +58,11 @@ public class TurbineError extends Error {
     BAD_MODULE_INFO("unexpected declaration found in module-info"),
     UNCLOSED_COMMENT("unclosed comment"),
     UNEXPECTED_TYPE("unexpected type %s"),
-    EXPECTED_INTERFACE("expected interface type"),
-    UNEXPECTED_INTERFACE("unexpected interface type"),
+    EXPECTED_INTERFACE("expected interface type: %s"),
+    UNEXPECTED_INTERFACE("unexpected interface type: %s"),
     UNEXPECTED_MODIFIER("unexpected modifier: %s"),
+    INVALID_TYPE_ARGUMENTS("expected %d type arguments for %s, got %d"),
+    NO_JAVA_LANG("could not find java.lang on bootclasspath"),
     PROC("%s");
 
     private final String message;
@@ -99,6 +102,11 @@ public class TurbineError extends Error {
   }
 
   private final ImmutableList<TurbineDiagnostic> diagnostics;
+
+  public TurbineError(ImmutableList<TurbineDiagnostic> diagnostics, TurbineError cause) {
+    super(cause);
+    this.diagnostics = diagnostics;
+  }
 
   public TurbineError(ImmutableList<TurbineDiagnostic> diagnostics) {
     this.diagnostics = diagnostics;

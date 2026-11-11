@@ -17,13 +17,13 @@
 package com.google.turbine.binder;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
-import static com.google.common.collect.Iterables.getLast;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static com.google.common.collect.MoreCollectors.onlyElement;
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.turbine.testing.TestClassPaths.TURBINE_BOOTCLASSPATH;
 import static com.google.turbine.testing.TestResources.getResourceBytes;
 import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.util.Arrays.stream;
 import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
 import static org.junit.Assert.assertThrows;
@@ -50,9 +50,10 @@ import com.google.turbine.type.Type.ClassTy;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Arrays;
+import java.util.jar.Attributes;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
+import java.util.jar.Manifest;
 import javax.tools.StandardJavaFileManager;
 import javax.tools.StandardLocation;
 import javax.tools.ToolProvider;
@@ -61,6 +62,8 @@ import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
+import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.Opcodes;
 
 @RunWith(Parameterized.class)
 public class ClassPathBinderTest {
@@ -73,7 +76,7 @@ public class ClassPathBinderTest {
           ToolProvider.getSystemJavaCompiler().getStandardFileManager(null, ENGLISH, UTF_8),
           StandardLocation.PLATFORM_CLASS_PATH),
     };
-    return Arrays.stream(testCases).map(x -> new Object[] {x}).collect(toImmutableList());
+    return stream(testCases).map(x -> new Object[] {x}).collect(toImmutableList());
   }
 
   private final ClassPath classPath;
@@ -174,7 +177,7 @@ public class ClassPathBinderTest {
             c.interfaceTypes().stream()
                 .filter(i -> ((ClassTy) i).sym().equals(new ClassSymbol("java/util/List")))
                 .collect(onlyElement());
-    assertThat(getLast(listInterface.classes()).targs()).hasSize(1);
+    assertThat(listInterface.classes().getLast().targs()).hasSize(1);
   }
 
   @Test
@@ -247,5 +250,28 @@ public class ClassPathBinderTest {
     ClassPath classPath = FileManagerClassBinder.adapt(fileManager, StandardLocation.CLASS_PATH);
     assertThat(new String(classPath.resource("foo/bar/hello.txt").get(), UTF_8)).isEqualTo("hello");
     assertThat(classPath.resource("foo/bar/NoSuch.class")).isNull();
+  }
+
+  @Test
+  public void originalJarFile() throws Exception {
+    Path path = temporaryFolder.newFile("tmp.jar").toPath();
+    try (JarOutputStream jos = new JarOutputStream(Files.newOutputStream(path))) {
+      jos.putNextEntry(new JarEntry("META-INF/MANIFEST.MF"));
+      Manifest manifest = new Manifest();
+      Attributes attributes = manifest.getMainAttributes();
+      attributes.put(Attributes.Name.MANIFEST_VERSION, "1.0");
+      attributes.put(new Attributes.Name("Original-Jar-Path"), "original.jar");
+      manifest.write(jos);
+
+      jos.putNextEntry(new JarEntry("foo/bar/Baz.class"));
+      ClassWriter cw = new ClassWriter(0);
+      cw.visit(52, Opcodes.ACC_PUBLIC, "foo/bar/Baz", null, "java/lang/Object", new String[] {});
+      byte[] bytes = cw.toByteArray();
+      jos.write(bytes);
+    }
+    ClassPath classPath = ClassPathBinder.bindClasspath(ImmutableList.of(path));
+    BytecodeBoundClass baz = classPath.env().get(new ClassSymbol("foo/bar/Baz"));
+    assertThat(baz).isNotNull();
+    assertThat(baz.jarFile()).isEqualTo("original.jar");
   }
 }

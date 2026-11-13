@@ -25,6 +25,8 @@ import com.google.auto.value.AutoValue;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.turbine.binder.bound.EnumConstantValue;
 import com.google.turbine.binder.bound.ModuleInfo.ExportInfo;
 import com.google.turbine.binder.bound.ModuleInfo.OpenInfo;
@@ -66,11 +68,12 @@ import com.google.turbine.bytecode.sig.SigWriter;
 import com.google.turbine.diag.SourceFile;
 import com.google.turbine.diag.TurbineError;
 import com.google.turbine.diag.TurbineError.ErrorKind;
+import com.google.turbine.diag.TurbineLog;
 import com.google.turbine.model.Const;
 import com.google.turbine.model.TurbineFlag;
 import com.google.turbine.model.TurbineTyKind;
-import com.google.turbine.model.TurbineVisibility;
 import com.google.turbine.options.LanguageVersion;
+import com.google.turbine.parallel.Parallel;
 import com.google.turbine.type.AnnoInfo;
 import com.google.turbine.type.Type;
 import com.google.turbine.type.Type.ArrayTy;
@@ -100,6 +103,11 @@ public class Lower {
 
     public abstract boolean emitPrivateFields();
 
+    // TODO: b/496858305 - consider removing this after rolling out the feature
+    public abstract boolean emitAllPrivateMemberClasses();
+
+    public abstract boolean methodParameters();
+
     public static LowerOptions createDefault() {
       return builder().build();
     }
@@ -107,7 +115,9 @@ public class Lower {
     public static Builder builder() {
       return new AutoValue_Lower_LowerOptions.Builder()
           .languageVersion(LanguageVersion.createDefault())
-          .emitPrivateFields(false);
+          .emitPrivateFields(false)
+          .emitAllPrivateMemberClasses(false)
+          .methodParameters(true);
     }
 
     /** Builder for {@link LowerOptions}. */
@@ -115,7 +125,18 @@ public class Lower {
     public abstract static class Builder {
       public abstract Builder languageVersion(LanguageVersion languageVersion);
 
+      public Builder javacOpts(ImmutableList<String> javacOpts) {
+        return emitPrivateFields(javacOpts.contains("-XDturbine.emitPrivateFields"))
+            .emitAllPrivateMemberClasses(
+                javacOpts.contains("-XDturbine.emitAllPrivateMemberClasses"))
+            .methodParameters(!javacOpts.contains("-XDturbine.noMethodParameters"));
+      }
+
       public abstract Builder emitPrivateFields(boolean emitPrivateFields);
+
+      public abstract Builder emitAllPrivateMemberClasses(boolean emitAllPrivateMemberClasses);
+
+      public abstract Builder methodParameters(boolean methodParameters);
 
       public abstract LowerOptions build();
     }
@@ -136,62 +157,98 @@ public class Lower {
     }
   }
 
+  @SuppressWarnings("ArrayRecordComponent")
+  private static record TaskResult(String name, byte[] bytes, ImmutableSet<ClassSymbol> symbols) {}
+
   /** Lowers all given classes to bytecode. */
   public static Lowered lowerAll(
+      ListeningExecutorService executor,
       LowerOptions options,
       ImmutableMap<ClassSymbol, SourceTypeBoundClass> units,
       ImmutableList<SourceModuleInfo> modules,
       Env<ClassSymbol, BytecodeBoundClass> classpath) {
     CompoundEnv<ClassSymbol, TypeBoundClass> env =
         CompoundEnv.<ClassSymbol, TypeBoundClass>of(classpath).append(new SimpleEnv<>(units));
-    ImmutableMap.Builder<String, byte[]> result = ImmutableMap.builder();
-    Set<ClassSymbol> symbols = new LinkedHashSet<>();
     // Output Java 8 bytecode at minimum, for type annotations
     int majorVersion = max(options.languageVersion().majorVersion(), 52);
-    for (ClassSymbol sym : units.keySet()) {
-      result.put(
-          sym.binaryName(),
-          lower(units.get(sym), env, sym, symbols, majorVersion, options.emitPrivateFields()));
+    ImmutableMap<ClassSymbol, SourceTypeBoundClass> pruned =
+        RemovePrivateMembers.process(env, units, options);
+    TurbineLog log = new TurbineLog();
+    List<ListenableFuture<TaskResult>> futures = new ArrayList<>();
+    for (var entry : pruned.entrySet()) {
+      ClassSymbol sym = entry.getKey();
+      futures.add(
+          executor.submit(
+              () ->
+                  lower(sym.binaryName(), entry.getValue(), env, sym, majorVersion, options, log)));
     }
     if (modules.size() == 1) {
       // single module mode: the module-info.class file is at the root
-      result.put("module-info", lower(getOnlyElement(modules), env, symbols, majorVersion));
+      futures.add(
+          executor.submit(
+              () ->
+                  lower("module-info", getOnlyElement(modules), env, majorVersion, options, log)));
     } else {
       // multi-module mode: the output module-info.class are in a directory corresponding to their
       // package
       for (SourceModuleInfo module : modules) {
-        result.put(
-            module.name().replace('.', '/') + "/module-info",
-            lower(module, env, symbols, majorVersion));
+        futures.add(
+            executor.submit(
+                () ->
+                    lower(
+                        module.name().replace('.', '/') + "/module-info",
+                        module,
+                        env,
+                        majorVersion,
+                        options,
+                        log)));
       }
     }
-    return Lowered.create(result.buildOrThrow(), ImmutableSet.copyOf(symbols));
+    ImmutableMap.Builder<String, byte[]> result = ImmutableMap.builder();
+    ImmutableSet.Builder<ClassSymbol> symbols = ImmutableSet.builder();
+    for (TaskResult lowered : Parallel.allAsList(futures)) {
+      result.put(lowered.name(), lowered.bytes());
+      symbols.addAll(lowered.symbols());
+    }
+    log.maybeThrow();
+    return Lowered.create(result.buildOrThrow(), symbols.build());
   }
 
   /** Lowers a class to bytecode. */
-  private static byte[] lower(
+  private static TaskResult lower(
+      String name,
       SourceTypeBoundClass info,
       Env<ClassSymbol, TypeBoundClass> env,
       ClassSymbol sym,
-      Set<ClassSymbol> symbols,
       int majorVersion,
-      boolean emitPrivateFields) {
-    return new Lower(env).lower(info, sym, symbols, majorVersion, emitPrivateFields);
+      LowerOptions lowerOptions,
+      TurbineLog log) {
+    Set<ClassSymbol> symbols = new LinkedHashSet<>();
+    byte[] bytes = new Lower(env, log, lowerOptions).lower(info, sym, symbols, majorVersion);
+    return new TaskResult(name, bytes, ImmutableSet.copyOf(symbols));
   }
 
-  private static byte[] lower(
+  private static TaskResult lower(
+      String name,
       SourceModuleInfo module,
       CompoundEnv<ClassSymbol, TypeBoundClass> env,
-      Set<ClassSymbol> symbols,
-      int majorVersion) {
-    return new Lower(env).lower(module, symbols, majorVersion);
+      int majorVersion,
+      LowerOptions lowerOptions,
+      TurbineLog log) {
+    Set<ClassSymbol> symbols = new LinkedHashSet<>();
+    byte[] bytes = new Lower(env, log, lowerOptions).lower(module, symbols, majorVersion);
+    return new TaskResult(name, bytes, ImmutableSet.copyOf(symbols));
   }
 
   private final LowerSignature sig = new LowerSignature();
   private final Env<ClassSymbol, TypeBoundClass> env;
+  private final TurbineLog log;
+  private final LowerOptions lowerOptions;
 
-  public Lower(Env<ClassSymbol, TypeBoundClass> env) {
+  public Lower(Env<ClassSymbol, TypeBoundClass> env, TurbineLog log, LowerOptions lowerOptions) {
     this.env = env;
+    this.log = log;
+    this.lowerOptions = lowerOptions;
   }
 
   private byte[] lower(SourceModuleInfo module, Set<ClassSymbol> symbols, int majorVersion) {
@@ -277,11 +334,7 @@ public class Lower {
   }
 
   private byte[] lower(
-      SourceTypeBoundClass info,
-      ClassSymbol sym,
-      Set<ClassSymbol> symbols,
-      int majorVersion,
-      boolean emitPrivateFields) {
+      SourceTypeBoundClass info, ClassSymbol sym, Set<ClassSymbol> symbols, int majorVersion) {
     int access = classAccess(info);
     String name = sig.descriptor(sym);
     String signature = sig.classSignature(info, env);
@@ -307,18 +360,11 @@ public class Lower {
 
     List<ClassFile.MethodInfo> methods = new ArrayList<>();
     for (MethodInfo m : info.methods()) {
-      if (TurbineVisibility.fromAccess(m.access()) == TurbineVisibility.PRIVATE) {
-        // TODO(cushon): drop private members earlier?
-        continue;
-      }
       methods.add(lowerMethod(m, sym));
     }
 
     ImmutableList.Builder<ClassFile.FieldInfo> fields = ImmutableList.builder();
     for (FieldInfo f : info.fields()) {
-      if (!emitPrivateFields && (f.access() & TurbineFlag.ACC_PRIVATE) == TurbineFlag.ACC_PRIVATE) {
-        continue;
-      }
       fields.add(lowerField(f));
     }
 
@@ -394,7 +440,8 @@ public class Lower {
 
     ImmutableList<TypeAnnotationInfo> typeAnnotations = methodTypeAnnotations(m);
 
-    ImmutableList<ClassFile.MethodInfo.ParameterInfo> parameters = methodParameters(m);
+    ImmutableList<ClassFile.MethodInfo.ParameterInfo> parameters =
+        lowerOptions.methodParameters() ? methodParameters(m) : ImmutableList.of();
 
     return new ClassFile.MethodInfo(
         access,
@@ -652,15 +699,11 @@ public class Lower {
   private @Nullable RuntimeVisibility getVisibility(ClassSymbol sym) {
     RetentionPolicy retention =
         requireNonNull(env.getNonNull(sym).annotationMetadata()).retention();
-    switch (retention) {
-      case CLASS:
-        return RuntimeVisibility.INVISIBLE;
-      case RUNTIME:
-        return RuntimeVisibility.VISIBLE;
-      case SOURCE:
-        return null;
-    }
-    throw new AssertionError(retention);
+    return switch (retention) {
+      case CLASS -> RuntimeVisibility.INVISIBLE;
+      case RUNTIME -> RuntimeVisibility.VISIBLE;
+      case SOURCE -> null;
+    };
   }
 
   private ImmutableMap<String, ElementValue> annotationValues(ImmutableMap<String, Const> values) {
@@ -672,45 +715,39 @@ public class Lower {
   }
 
   private ElementValue annotationValue(Const value) {
-    switch (value.kind()) {
-      case CLASS_LITERAL:
-        {
-          TurbineClassValue classValue = (TurbineClassValue) value;
-          return new ElementValue.ConstTurbineClassValue(
-              SigWriter.type(sig.signature(classValue.type())));
+    return switch (value.kind()) {
+      case CLASS_LITERAL -> {
+        TurbineClassValue classValue = (TurbineClassValue) value;
+        yield new ElementValue.ConstTurbineClassValue(
+            SigWriter.type(sig.signature(classValue.type())));
+      }
+      case ENUM_CONSTANT -> {
+        EnumConstantValue enumValue = (EnumConstantValue) value;
+        yield new ElementValue.EnumConstValue(
+            sig.objectType(enumValue.sym().owner()), enumValue.sym().name());
+      }
+      case ARRAY -> {
+        Const.ArrayInitValue arrayValue = (Const.ArrayInitValue) value;
+        List<ElementValue> values = new ArrayList<>();
+        for (Const element : arrayValue.elements()) {
+          values.add(annotationValue(element));
         }
-      case ENUM_CONSTANT:
-        {
-          EnumConstantValue enumValue = (EnumConstantValue) value;
-          return new ElementValue.EnumConstValue(
-              sig.objectType(enumValue.sym().owner()), enumValue.sym().name());
+        yield new ElementValue.ArrayValue(values);
+      }
+      case ANNOTATION -> {
+        TurbineAnnotationValue annotationValue = (TurbineAnnotationValue) value;
+        RuntimeVisibility visibility = getVisibility(annotationValue.sym());
+        if (visibility == null) {
+          visibility = RuntimeVisibility.VISIBLE;
         }
-      case ARRAY:
-        {
-          Const.ArrayInitValue arrayValue = (Const.ArrayInitValue) value;
-          List<ElementValue> values = new ArrayList<>();
-          for (Const element : arrayValue.elements()) {
-            values.add(annotationValue(element));
-          }
-          return new ElementValue.ArrayValue(values);
-        }
-      case ANNOTATION:
-        {
-          TurbineAnnotationValue annotationValue = (TurbineAnnotationValue) value;
-          RuntimeVisibility visibility = getVisibility(annotationValue.sym());
-          if (visibility == null) {
-            visibility = RuntimeVisibility.VISIBLE;
-          }
-          return new ElementValue.ConstTurbineAnnotationValue(
-              new AnnotationInfo(
-                  sig.objectType(annotationValue.sym()),
-                  visibility,
-                  annotationValues(annotationValue.values())));
-        }
-      case PRIMITIVE:
-        return new ElementValue.ConstValue((Const.Value) value);
-    }
-    throw new AssertionError(value.kind());
+        yield new ElementValue.ConstTurbineAnnotationValue(
+            new AnnotationInfo(
+                sig.objectType(annotationValue.sym()),
+                visibility,
+                annotationValues(annotationValue.values())));
+      }
+      case PRIMITIVE -> new ElementValue.ConstValue((Const.Value) value);
+    };
   }
 
   /** Lower type annotations in a class declaration's signature. */
@@ -794,7 +831,7 @@ public class Lower {
       TargetType boundTargetType) {
     int typeParameterIndex = 0;
     for (TyVarInfo p : typeParameters) {
-      for (AnnoInfo anno : groupRepeated(env, p.annotations())) {
+      for (AnnoInfo anno : groupRepeated(env, log, p.annotations())) {
         AnnotationInfo info = lowerAnnotation(anno);
         if (info == null) {
           continue;
@@ -856,31 +893,19 @@ public class Lower {
      */
     private void lowerTypeAnnotations(Type type, TypePath path) {
       switch (type.tyKind()) {
-        case TY_VAR:
-          lowerTypeAnnotations(((TyVar) type).annos(), path);
-          break;
-        case CLASS_TY:
-          lowerClassTypeTypeAnnotations((ClassTy) type, path);
-          break;
-        case ARRAY_TY:
-          lowerArrayTypeAnnotations((ArrayTy) type, path);
-          break;
-        case WILD_TY:
-          lowerWildTyTypeAnnotations((WildTy) type, path);
-          break;
-        case PRIM_TY:
-          lowerTypeAnnotations(((Type.PrimTy) type).annos(), path);
-          break;
-        case VOID_TY:
-          break;
-        default:
-          throw new AssertionError(type.tyKind());
+        case TY_VAR -> lowerTypeAnnotations(((TyVar) type).annos(), path);
+        case CLASS_TY -> lowerClassTypeTypeAnnotations((ClassTy) type, path);
+        case ARRAY_TY -> lowerArrayTypeAnnotations((ArrayTy) type, path);
+        case WILD_TY -> lowerWildTyTypeAnnotations((WildTy) type, path);
+        case PRIM_TY -> lowerTypeAnnotations(((Type.PrimTy) type).annos(), path);
+        case VOID_TY -> {}
+        default -> throw new AssertionError(type.tyKind());
       }
     }
 
     /** Lower a list of type annotations. */
     private void lowerTypeAnnotations(ImmutableList<AnnoInfo> annos, TypePath path) {
-      for (AnnoInfo anno : groupRepeated(env, annos)) {
+      for (AnnoInfo anno : groupRepeated(env, log, annos)) {
         AnnotationInfo info = lowerAnnotation(anno);
         if (info == null) {
           continue;
@@ -891,14 +916,11 @@ public class Lower {
 
     private void lowerWildTyTypeAnnotations(WildTy type, TypePath path) {
       switch (type.boundKind()) {
-        case NONE:
-          lowerTypeAnnotations(type.annotations(), path);
-          break;
-        case UPPER:
-        case LOWER:
+        case NONE -> lowerTypeAnnotations(type.annotations(), path);
+        case UPPER, LOWER -> {
           lowerTypeAnnotations(type.annotations(), path);
           lowerTypeAnnotations(type.bound(), path.wild());
-          break;
+        }
       }
     }
 

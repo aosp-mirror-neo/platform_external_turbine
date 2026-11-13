@@ -73,13 +73,23 @@ public class TurbineDiagnostic {
     if (line() != -1) {
       sb.append(':').append(line());
     }
-    sb.append(": error: ");
-    sb.append(message()).append(System.lineSeparator());
+    String severity =
+        switch (severity()) {
+          case ERROR -> "error";
+          case WARNING, MANDATORY_WARNING -> "warning";
+          case NOTE -> "note";
+          case OTHER -> "";
+        };
+    if (!severity.isEmpty()) {
+      sb.append(": ").append(severity);
+    }
+    sb.append(": ").append(message());
     if (line() != -1 && column() != -1) {
       requireNonNull(source); // line and column imply source is non-null
+      sb.append(System.lineSeparator());
       sb.append(CharMatcher.breakingWhitespace().trimTrailingFrom(source.lineMap().line(position)))
           .append(System.lineSeparator());
-      sb.append(" ".repeat(column() - 1)).append('^');
+      sb.repeat(" ", column() - 1).append('^');
     }
     return sb.toString();
   }
@@ -96,22 +106,23 @@ public class TurbineDiagnostic {
       SourceFile source,
       int position) {
     switch (kind) {
-      case SYMBOL_NOT_FOUND:
-        {
+      case SYMBOL_NOT_FOUND ->
           checkArgument(
               args.size() == 1 && getOnlyElement(args) instanceof ClassSymbol,
               "diagnostic (%s) has invalid argument %s",
               kind,
               args);
-          break;
-        }
-      default: // fall out
+      default -> {}
     }
     return new TurbineDiagnostic(severity, kind, args, source, position);
   }
 
   public static TurbineDiagnostic format(Diagnostic.Kind severity, ErrorKind kind, String message) {
     return create(severity, kind, ImmutableList.of(message), null, -1);
+  }
+
+  public static TurbineDiagnostic format(Diagnostic.Kind severity, ErrorKind kind) {
+    return create(severity, kind, ImmutableList.of(), null, -1);
   }
 
   /**
@@ -148,10 +159,9 @@ public class TurbineDiagnostic {
 
   @Override
   public boolean equals(@Nullable Object obj) {
-    if (!(obj instanceof TurbineDiagnostic)) {
+    if (!(obj instanceof TurbineDiagnostic that)) {
       return false;
     }
-    TurbineDiagnostic that = (TurbineDiagnostic) obj;
     return severity.equals(that.severity)
         && kind.equals(that.kind)
         && args.equals(that.args)

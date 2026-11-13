@@ -19,6 +19,8 @@ package com.google.turbine.processing;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.MoreCollectors.onlyElement;
 import static com.google.common.truth.Truth.assertThat;
+import static com.google.common.truth.TruthJUnit.assume;
+import static com.google.common.util.concurrent.MoreExecutors.newDirectExecutorService;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.joining;
@@ -51,10 +53,12 @@ import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.io.UncheckedIOException;
 import java.io.Writer;
+import java.lang.reflect.Method;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -69,6 +73,7 @@ import javax.lang.model.SourceVersion;
 import javax.lang.model.element.AnnotationMirror;
 import javax.lang.model.element.Element;
 import javax.lang.model.element.ExecutableElement;
+import javax.lang.model.element.PackageElement;
 import javax.lang.model.element.RecordComponentElement;
 import javax.lang.model.element.TypeElement;
 import javax.lang.model.element.VariableElement;
@@ -77,6 +82,7 @@ import javax.lang.model.type.ErrorType;
 import javax.lang.model.type.ExecutableType;
 import javax.lang.model.type.TypeMirror;
 import javax.lang.model.util.ElementFilter;
+import javax.lang.model.util.Elements;
 import javax.tools.Diagnostic;
 import javax.tools.FileObject;
 import javax.tools.JavaFileObject;
@@ -118,7 +124,7 @@ public class ProcessingIntegrationTest {
     ImmutableList<String> messages =
         e.diagnostics().stream().map(TurbineDiagnostic::message).collect(toImmutableList());
     assertThat(messages).hasSize(2);
-    assertThat(messages.get(0)).contains("could not resolve NoSuch");
+    assertThat(messages.getFirst()).contains("could not resolve NoSuch");
     assertThat(messages.get(1)).contains("crash!");
   }
 
@@ -165,7 +171,7 @@ public class ProcessingIntegrationTest {
     ImmutableList<String> diags =
         e.diagnostics().stream().map(d -> d.message()).collect(toImmutableList());
     assertThat(diags).hasSize(2);
-    assertThat(diags.get(0)).contains("proc warning");
+    assertThat(diags.getFirst()).contains("proc warning");
     assertThat(diags.get(1)).contains("proc error");
   }
 
@@ -219,6 +225,7 @@ public class ProcessingIntegrationTest {
             "}");
     BindingResult bound =
         Binder.bind(
+            newDirectExecutorService(),
             units,
             ClassPathBinder.bindClasspath(ImmutableList.of()),
             ProcessorInfo.create(
@@ -255,6 +262,7 @@ public class ProcessingIntegrationTest {
             "class Two extends One {}");
     BindingResult bound =
         Binder.bind(
+            newDirectExecutorService(),
             units,
             ClassPathBinder.bindClasspath(ImmutableList.of()),
             ProcessorInfo.create(
@@ -494,6 +502,7 @@ public class ProcessingIntegrationTest {
             "}");
     BindingResult bound =
         Binder.bind(
+            newDirectExecutorService(),
             units,
             ClassPathBinder.bindClasspath(ImmutableList.of()),
             ProcessorInfo.create(
@@ -609,7 +618,11 @@ public class ProcessingIntegrationTest {
     ImmutableList<Tree.CompUnit> units =
         parseUnit(
             "=== R.java ===", //
-            "record R<T>(@Deprecated T x, int... y) {}");
+            """
+            record R<T>(@Deprecated T x, int... y) {
+              static final int Z = 42;
+            }
+            """);
     TurbineError e = runProcessors(units, new RecordProcessor());
     assertThat(
             e.diagnostics().stream()
@@ -619,12 +632,16 @@ public class ProcessingIntegrationTest {
             "RECORD R java.lang.Record",
             "RECORD_COMPONENT x",
             "RECORD_COMPONENT y",
-            "CONSTRUCTOR R(T,int[])",
+            "FIELD x",
+            "FIELD y",
+            "FIELD Z",
+            "CONSTRUCTOR R(T,int...)", // javac puts the constructor before FIELD Z
             "METHOD toString()",
             "METHOD hashCode()",
             "METHOD equals(java.lang.Object)",
             "METHOD x()",
-            "METHOD y()");
+            "METHOD y()")
+        .inOrder();
   }
 
   @SupportedAnnotationTypes("*")
@@ -683,6 +700,7 @@ public class ProcessingIntegrationTest {
     TurbineLog log = new TurbineLog();
     BindingResult unused =
         Binder.bind(
+            newDirectExecutorService(),
             log,
             units,
             ClassPathBinder.bindClasspath(ImmutableList.of(libJar)),
@@ -774,7 +792,7 @@ public class ProcessingIntegrationTest {
             "import java.util.List;",
             "class A<T> {",
             "  <U extends T> U f(List<U> list) {",
-            "    return list.get(0);",
+            "    return list.getFirst();",
             "  }",
             "}",
             "class B extends A<String> {",
@@ -897,6 +915,7 @@ public class ProcessingIntegrationTest {
     TurbineLog log = new TurbineLog();
     BindingResult bound =
         Binder.bind(
+            newDirectExecutorService(),
             log,
             units,
             ClassPathBinder.bindClasspath(ImmutableList.of(libJar)),
@@ -1083,16 +1102,9 @@ public class ProcessingIntegrationTest {
     assertThat(
             e.diagnostics().stream()
                 .filter(d -> d.severity().equals(Diagnostic.Kind.ERROR))
-                .map(d -> d.message()))
+                .map(d -> d.message())
+                .filter(m -> !m.startsWith("could not resolve")))
         .containsExactly(
-            "could not resolve M",
-            "could not resolve N",
-            "could not resolve A",
-            "could not resolve B",
-            "could not resolve B.E",
-            "could not resolve C",
-            "could not resolve D",
-            "could not resolve F",
             "T supertype: M<N>, arguments: [N], enclosing: none",
             "a supertype: A, arguments: [], enclosing: none",
             "b supertype: B<C,D>, arguments: [C, D], enclosing: none",
@@ -1163,11 +1175,488 @@ public class ProcessingIntegrationTest {
             "field h with annotations [], type '@A int[]' with annotations []");
   }
 
+  @SupportedAnnotationTypes("*")
+  public static class UnnamedPackageProcessor extends AbstractProcessor {
+    @Override
+    public SourceVersion getSupportedSourceVersion() {
+      return SourceVersion.latestSupported();
+    }
+
+    private boolean first = true;
+
+    @Override
+    public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
+      if (!first) {
+        return false;
+      }
+      first = false;
+      PackageElement p = processingEnv.getElementUtils().getPackageElement("");
+      for (Element e : p.getEnclosedElements()) {
+        processingEnv
+            .getMessager()
+            .printMessage(
+                Diagnostic.Kind.ERROR, String.format("package '%s' contains %s", p, e), e);
+      }
+      return false;
+    }
+  }
+
+  @Test
+  public void unnamedPackage() {
+    ImmutableList<Tree.CompUnit> units =
+        parseUnit(
+            """
+            === T.java ===
+            class A {}
+            class B {}
+            """);
+    TurbineError e = runProcessors(units, new UnnamedPackageProcessor());
+    assertThat(
+            e.diagnostics().stream()
+                .filter(d -> d.severity().equals(Diagnostic.Kind.ERROR))
+                .map(d -> d.message()))
+        .containsExactly("package '' contains A", "package '' contains B");
+  }
+
+  @SupportedAnnotationTypes("*")
+  public static class RecordMembers extends AbstractProcessor {
+    @Override
+    public SourceVersion getSupportedSourceVersion() {
+      return SourceVersion.latestSupported();
+    }
+
+    @Override
+    public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
+      if (!roundEnv.processingOver()) {
+        return false;
+      }
+      for (Element e :
+          processingEnv.getElementUtils().getTypeElement("Person").getEnclosedElements()) {
+        processingEnv.getMessager().printError(e + " " + e.getKind(), e);
+      }
+      return false;
+    }
+  }
+
+  @Test
+  public void recordMembers() throws Exception {
+    ImmutableList<Tree.CompUnit> units =
+        parseUnit(
+            """
+            === Person.java ===
+            public record Person(String name) {
+            }
+            """);
+    TurbineError e = runProcessors(units, new RecordMembers());
+    assertThat(
+            e.diagnostics().stream()
+                .filter(d -> d.severity().equals(Diagnostic.Kind.ERROR))
+                .map(d -> d.message()))
+        .containsExactly(
+            "name RECORD_COMPONENT",
+            "name FIELD",
+            "Person(java.lang.String) CONSTRUCTOR",
+            "toString() METHOD",
+            "hashCode() METHOD",
+            "equals(java.lang.Object) METHOD",
+            "name() METHOD");
+  }
+
+  @SupportedAnnotationTypes("*")
+  public static class RecordFields extends AbstractProcessor {
+    @Override
+    public SourceVersion getSupportedSourceVersion() {
+      return SourceVersion.latestSupported();
+    }
+
+    @Override
+    public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
+      if (!roundEnv.processingOver()) {
+        return false;
+      }
+      for (VariableElement e :
+          fieldsIn(
+              processingEnv.getElementUtils().getTypeElement("Person").getEnclosedElements())) {
+        processingEnv
+            .getMessager()
+            .printError(
+                String.format(
+                    "%s: modifiers %s, type %s, annotations %s",
+                    e.getSimpleName(), e.getModifiers(), e.asType(), e.getAnnotationMirrors()),
+                e);
+      }
+      return false;
+    }
+  }
+
+  @Test
+  public void recordFields() throws Exception {
+    ImmutableList<Tree.CompUnit> units =
+        parseUnit(
+            """
+            === A.java ===
+            import java.lang.annotation.ElementType;
+            import java.lang.annotation.Target;
+            @Target({ElementType.FIELD, ElementType.TYPE_USE})
+            public @interface A {}
+            === B.java ===
+            import java.lang.annotation.ElementType;
+            import java.lang.annotation.Target;
+            @Target({ElementType.PARAMETER})
+            public @interface B {}
+            === Person.java ===
+            import java.util.List;
+            public record Person(String name, List<@A String> b, final @A int c, @B int d) {
+            }
+            """);
+    TurbineError e = runProcessors(units, new RecordFields());
+    assertThat(
+            e.diagnostics().stream()
+                .filter(d -> d.severity().equals(Diagnostic.Kind.ERROR))
+                .map(d -> d.message()))
+        .containsExactly(
+            "name: modifiers [private, final], type java.lang.String, annotations []",
+            "b: modifiers [private, final], type java.util.List<java.lang.@A String>, annotations"
+                + " []",
+            "c: modifiers [private, final], type @A int, annotations [@A]",
+            "d: modifiers [private, final], type int, annotations []");
+  }
+
+  @SupportedAnnotationTypes("*")
+  public static class EnumConstants extends AbstractProcessor {
+    @Override
+    public SourceVersion getSupportedSourceVersion() {
+      return SourceVersion.latestSupported();
+    }
+
+    @Override
+    public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
+      if (!roundEnv.processingOver()) {
+        return false;
+      }
+      for (VariableElement e :
+          fieldsIn(processingEnv.getElementUtils().getTypeElement("E").getEnclosedElements())) {
+        String javadoc = processingEnv.getElementUtils().getDocComment(e);
+        processingEnv
+            .getMessager()
+            .printError(String.format("%s: %s", e.getSimpleName(), javadoc.trim()), e);
+      }
+      return false;
+    }
+  }
+
+  @Test
+  public void enumConstantPosition() throws Exception {
+    ImmutableList<Tree.CompUnit> units =
+        parseUnit(
+            """
+            === E.java ===
+            enum E {
+                /** constant 1 */
+                CONSTANT1,
+                /** constant 2 */
+                @Deprecated
+                CONSTANT2;
+            }
+            """);
+    TurbineError e = runProcessors(units, new EnumConstants());
+    assertThat(e)
+        .hasMessageThat()
+        .isEqualTo(
+            normalizeLineEndings(
+                """
+                E.java:3: error: CONSTANT1: constant 1
+                    CONSTANT1,
+                    ^
+                E.java:6: error: CONSTANT2: constant 2
+                    CONSTANT2;
+                    ^\
+                """));
+  }
+
+  @SupportedAnnotationTypes("*")
+  public static class ErrorBinaryNameProcessor extends AbstractProcessor {
+    @Override
+    public SourceVersion getSupportedSourceVersion() {
+      return SourceVersion.latestSupported();
+    }
+
+    @Override
+    public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
+      TypeElement element = processingEnv.getElementUtils().getTypeElement("T");
+      for (Element m : fieldsIn(element.getEnclosedElements())) {
+        TypeMirror t = m.asType();
+        processingEnv
+            .getMessager()
+            .printNote(
+                t.getKind()
+                    + " "
+                    + processingEnv.getElementUtils().getBinaryName(MoreTypes.asTypeElement(t)),
+                m);
+      }
+      return false;
+    }
+  }
+
+  @Test
+  public void errorBinaryName() throws Exception {
+    ImmutableList<Tree.CompUnit> units =
+        parseUnit(
+            """
+            === T.java ===
+            import java.util.Map;
+            class T {
+              NoSuch.Bar f;
+              Map.Entry s;
+            }
+            """);
+    TurbineError e = runProcessors(units, new ErrorBinaryNameProcessor());
+    assertThat(
+            e.diagnostics().stream()
+                .filter(d -> d.kind() == TurbineError.ErrorKind.PROC)
+                .map(d -> d.message()))
+        .containsExactly("ERROR NoSuch.Bar", "DECLARED java.util.Map$Entry");
+  }
+
+  @SupportedAnnotationTypes("*")
+  public static class PermittedSubclasses extends AbstractProcessor {
+    @Override
+    public SourceVersion getSupportedSourceVersion() {
+      return SourceVersion.latestSupported();
+    }
+
+    @Override
+    public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
+      if (!roundEnv.processingOver()) {
+        return false;
+      }
+      List<? extends TypeMirror> permits =
+          processingEnv.getElementUtils().getTypeElement("T").getPermittedSubclasses();
+      processingEnv
+          .getMessager()
+          .printError(
+              String.format(
+                  "permits %s", permits.stream().map(t -> t.toString()).collect(joining(", "))));
+      return false;
+    }
+  }
+
+  @Test
+  public void permittedSubclasses() throws Exception {
+    ImmutableList<Tree.CompUnit> units =
+        parseUnit(
+            """
+            === T.java ===
+            sealed class T {
+               final static class A extends T {}
+               final static class B extends T {}
+               final static class C extends T {}
+            }
+            """);
+    TurbineError e = runProcessors(units, new PermittedSubclasses());
+    assertThat(
+            e.diagnostics().stream()
+                .filter(d -> d.severity().equals(Diagnostic.Kind.ERROR))
+                .map(d -> d.message()))
+        .containsExactly("permits T.A, T.B, T.C");
+  }
+
+  @Test
+  public void bytecodePermittedSubclasses() throws IOException {
+    Map<String, byte[]> library =
+        IntegrationTestSupport.runTurbine(
+            ImmutableMap.of(
+                "T.java",
+                """
+                public sealed class T {
+                   final static class A extends T {}
+                   final static class B extends T {}
+                   final static class C extends T {}
+                }
+                """),
+            ImmutableList.of());
+    Path libJar = temporaryFolder.newFile("lib.jar").toPath();
+    try (OutputStream os = Files.newOutputStream(libJar);
+        JarOutputStream jos = new JarOutputStream(os)) {
+      jos.putNextEntry(new JarEntry("T.class"));
+      jos.write(requireNonNull(library.get("T")));
+    }
+
+    ImmutableList<Tree.CompUnit> units =
+        parseUnit(
+            "=== V.java ===",
+            """
+            class V {
+              T t;
+            }
+            """);
+
+    TurbineLog log = new TurbineLog();
+    BindingResult unused =
+        Binder.bind(
+            newDirectExecutorService(),
+            log,
+            units,
+            ClassPathBinder.bindClasspath(ImmutableList.of(libJar)),
+            ProcessorInfo.create(
+                ImmutableList.of(new PermittedSubclasses()),
+                getClass().getClassLoader(),
+                ImmutableMap.of(),
+                SourceVersion.latestSupported()),
+            TestClassPaths.TURBINE_BOOTCLASSPATH,
+            Optional.empty());
+    ImmutableList<String> messages =
+        log.diagnostics().stream().map(TurbineDiagnostic::message).collect(toImmutableList());
+    assertThat(messages).contains("permits T.A, T.B, T.C");
+  }
+
+  @SupportedAnnotationTypes("*")
+  public static class DocComment extends AbstractProcessor {
+    @Override
+    public SourceVersion getSupportedSourceVersion() {
+      return SourceVersion.latestSupported();
+    }
+
+    @Override
+    public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
+      if (!roundEnv.processingOver()) {
+        return false;
+      }
+      for (Element e :
+          ElementFilter.fieldsIn(
+              processingEnv.getElementUtils().getTypeElement("T").getEnclosedElements())) {
+        String javadoc = processingEnv.getElementUtils().getDocComment(e);
+        processingEnv.getMessager().printError(e.getSimpleName() + "\n" + javadoc);
+      }
+      return false;
+    }
+  }
+
+  @Test
+  public void markdownJavadoc() throws Exception {
+    ImmutableList<Tree.CompUnit> units =
+        parseUnit(
+            """
+            === T.java ===
+            public class T {
+              /// hello
+              /// markdown
+
+              /// javadoc
+              public int f;
+
+              /// hello
+              ///  markdown
+              ///   javadoc
+              public int g;
+
+              ///    hello
+              ///     indented
+              ///      markdown
+              ///       javadoc
+              public int h;
+            }
+            """);
+    TurbineError e = runProcessors(units, new DocComment());
+    assertThat(
+            e.diagnostics().stream()
+                .filter(d -> d.severity().equals(Diagnostic.Kind.ERROR))
+                .map(d -> d.message()))
+        .containsExactly(
+            """
+            f
+            javadoc\
+            """,
+            """
+            g
+            hello
+             markdown
+              javadoc\
+            """,
+            """
+            h
+            hello
+             indented
+              markdown
+               javadoc\
+            """);
+  }
+
+  @SupportedAnnotationTypes("*")
+  public static class DocCommentKind extends AbstractProcessor {
+    @Override
+    public SourceVersion getSupportedSourceVersion() {
+      return SourceVersion.latestSupported();
+    }
+
+    @Override
+    public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
+      if (!roundEnv.processingOver()) {
+        return false;
+      }
+      Elements elements = ((TurbineElements) processingEnv.getElementUtils()).future();
+      for (Element f :
+          ElementFilter.fieldsIn(
+              processingEnv.getElementUtils().getTypeElement("T").getEnclosedElements())) {
+        String javadoc = elements.getDocComment(f);
+        Object kind;
+        try {
+          Method method = Elements.class.getMethod("getDocCommentKind", Element.class);
+          kind = method.invoke(elements, f);
+        } catch (ReflectiveOperationException e) {
+          throw new LinkageError(e.getMessage(), e);
+        }
+        processingEnv
+            .getMessager()
+            .printError(
+                String.format(
+                    "element: %s\nkind: %s\njavadoc: %s", f.getSimpleName(), kind, javadoc),
+                f);
+      }
+      return false;
+    }
+  }
+
+  @Test
+  public void docCommentKind() throws Exception {
+    // getDocCommentKind is since 23
+    assume().that(Runtime.version().feature()).isAtLeast(23);
+    ImmutableList<Tree.CompUnit> units =
+        parseUnit(
+            """
+            === T.java ===
+            public class T {
+              /// markdown javadoc
+              public int f;
+
+              /** traditional javadoc */
+              public int g;
+            }
+            """);
+    TurbineError e = runProcessors(units, new DocCommentKind());
+    assertThat(
+            e.diagnostics().stream()
+                .filter(d -> d.severity().equals(Diagnostic.Kind.ERROR))
+                .map(d -> d.message()))
+        .containsExactly(
+            """
+            element: f
+            kind: END_OF_LINE
+            javadoc: markdown javadoc\
+            """,
+            """
+            element: g
+            kind: TRADITIONAL
+            javadoc:  traditional javadoc \
+            """);
+  }
+
   private TurbineError runProcessors(ImmutableList<Tree.CompUnit> units, Processor... processors) {
     return assertThrows(
         TurbineError.class,
         () ->
             Binder.bind(
+                newDirectExecutorService(),
                 units,
                 ClassPathBinder.bindClasspath(ImmutableList.of()),
                 ProcessorInfo.create(
@@ -1177,5 +1666,9 @@ public class ProcessingIntegrationTest {
                     SourceVersion.latestSupported()),
                 TestClassPaths.TURBINE_BOOTCLASSPATH,
                 Optional.empty()));
+  }
+
+  private String normalizeLineEndings(String string) {
+    return string.lines().collect(joining(System.lineSeparator()));
   }
 }

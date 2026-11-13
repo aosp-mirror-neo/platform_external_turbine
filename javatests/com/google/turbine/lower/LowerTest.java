@@ -16,7 +16,9 @@
 
 package com.google.turbine.lower;
 
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.truth.Truth.assertThat;
+import static com.google.common.util.concurrent.MoreExecutors.newDirectExecutorService;
 import static com.google.turbine.testing.TestClassPaths.TURBINE_BOOTCLASSPATH;
 import static com.google.turbine.testing.TestResources.getResource;
 import static java.util.Objects.requireNonNull;
@@ -25,11 +27,14 @@ import static org.junit.Assert.assertThrows;
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import org.objectweb.asm.Opcodes;
 import com.google.turbine.binder.Binder;
 import com.google.turbine.binder.Binder.BindingResult;
 import com.google.turbine.binder.ClassPathBinder;
 import com.google.turbine.binder.bound.SourceTypeBoundClass;
+import com.google.turbine.binder.bound.TypeBoundClass;
+import com.google.turbine.binder.env.CompoundEnv;
 import com.google.turbine.binder.env.SimpleEnv;
 import com.google.turbine.binder.sym.ClassSymbol;
 import com.google.turbine.binder.sym.FieldSymbol;
@@ -38,6 +43,7 @@ import com.google.turbine.binder.sym.ParamSymbol;
 import com.google.turbine.binder.sym.TyVarSymbol;
 import com.google.turbine.bytecode.ByteReader;
 import com.google.turbine.bytecode.ConstantPoolReader;
+import com.google.turbine.diag.SourceFile;
 import com.google.turbine.diag.TurbineError;
 import com.google.turbine.model.TurbineConstantTypeKind;
 import com.google.turbine.model.TurbineFlag;
@@ -56,12 +62,14 @@ import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
+import java.util.stream.Stream;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -72,6 +80,7 @@ import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.FieldVisitor;
+import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.TypePath;
 
@@ -233,6 +242,7 @@ public class LowerTest {
 
     Map<String, byte[]> bytes =
         Lower.lowerAll(
+                newDirectExecutorService(),
                 Lower.LowerOptions.createDefault(),
                 ImmutableMap.of(
                     new ClassSymbol("test/Test"), c, new ClassSymbol("test/Test$Inner"), i),
@@ -250,6 +260,7 @@ public class LowerTest {
   public void innerClassAttributeOrder() throws IOException {
     BindingResult bound =
         Binder.bind(
+            newDirectExecutorService(),
             ImmutableList.of(
                 Parser.parse(
                     Joiner.on('\n')
@@ -264,6 +275,7 @@ public class LowerTest {
             /* moduleVersion= */ Optional.empty());
     Map<String, byte[]> lowered =
         Lower.lowerAll(
+                newDirectExecutorService(),
                 Lower.LowerOptions.createDefault(),
                 bound.units(),
                 bound.modules(),
@@ -312,13 +324,11 @@ public class LowerTest {
     for (int j = 0; j < attributesCount; j++) {
       String attributeName = pool.utf8(reader.u2());
       switch (attributeName) {
-        case "Signature":
+        case "Signature" -> {
           int unusedLength = reader.u4();
           signature = pool.utf8(reader.u2());
-          break;
-        default:
-          reader.skip(reader.u4());
-          break;
+        }
+        default -> reader.skip(reader.u4());
       }
     }
     assertThat(signature).isEqualTo("LA<[*>.I;");
@@ -328,6 +338,7 @@ public class LowerTest {
   public void typePath() throws Exception {
     BindingResult bound =
         Binder.bind(
+            newDirectExecutorService(),
             ImmutableList.of(
                 Parser.parse(
                     Joiner.on('\n')
@@ -344,6 +355,7 @@ public class LowerTest {
             /* moduleVersion= */ Optional.empty());
     Map<String, byte[]> lowered =
         Lower.lowerAll(
+                newDirectExecutorService(),
                 Lower.LowerOptions.createDefault(),
                 bound.units(),
                 bound.modules(),
@@ -421,12 +433,14 @@ public class LowerTest {
   public void deprecated() throws Exception {
     BindingResult bound =
         Binder.bind(
+            newDirectExecutorService(),
             ImmutableList.of(Parser.parse("@Deprecated class Test {}")),
             ClassPathBinder.bindClasspath(ImmutableList.of()),
             TURBINE_BOOTCLASSPATH,
             /* moduleVersion= */ Optional.empty());
     Map<String, byte[]> lowered =
         Lower.lowerAll(
+                newDirectExecutorService(),
                 Lower.LowerOptions.createDefault(),
                 bound.units(),
                 bound.modules(),
@@ -647,12 +661,14 @@ public class LowerTest {
   public void minClassVersion() throws Exception {
     BindingResult bound =
         Binder.bind(
+            newDirectExecutorService(),
             ImmutableList.of(Parser.parse("class Test {}")),
             ClassPathBinder.bindClasspath(ImmutableList.of()),
             TURBINE_BOOTCLASSPATH,
             /* moduleVersion= */ Optional.empty());
     Map<String, byte[]> lowered =
         Lower.lowerAll(
+                newDirectExecutorService(),
                 Lower.LowerOptions.builder()
                     .languageVersion(
                         LanguageVersion.fromJavacopts(
@@ -685,6 +701,7 @@ public class LowerTest {
   public void privateFields() throws Exception {
     BindingResult bound =
         Binder.bind(
+            newDirectExecutorService(),
             ImmutableList.of(
                 Parser.parse(
                     "class Test {\n" //
@@ -696,6 +713,7 @@ public class LowerTest {
             /* moduleVersion= */ Optional.empty());
     ImmutableMap<String, byte[]> lowered =
         Lower.lowerAll(
+                newDirectExecutorService(),
                 Lower.LowerOptions.builder().emitPrivateFields(true).build(),
                 bound.units(),
                 bound.modules(),
@@ -720,6 +738,7 @@ public class LowerTest {
   public void noPrivateFields() throws Exception {
     BindingResult bound =
         Binder.bind(
+            newDirectExecutorService(),
             ImmutableList.of(
                 Parser.parse(
                     "class Test {\n" //
@@ -731,6 +750,7 @@ public class LowerTest {
             /* moduleVersion= */ Optional.empty());
     ImmutableMap<String, byte[]> lowered =
         Lower.lowerAll(
+                newDirectExecutorService(),
                 Lower.LowerOptions.createDefault(),
                 bound.units(),
                 bound.modules(),
@@ -749,6 +769,384 @@ public class LowerTest {
             },
             0);
     assertThat(fields).containsExactly("y");
+  }
+
+  @Test
+  public void privateFieldsPrivateMemberClasses() throws Exception {
+    BindingResult bound =
+        Binder.bind(
+            newDirectExecutorService(),
+            ImmutableList.of(
+                Parser.parse(
+                    """
+                    class Test {
+                      private static class Inner {}
+                      private Inner x;
+                    }
+                    """)),
+            ClassPathBinder.bindClasspath(ImmutableList.of()),
+            TURBINE_BOOTCLASSPATH,
+            /* moduleVersion= */ Optional.empty());
+    ImmutableMap<String, byte[]> lowered =
+        Lower.lowerAll(
+                newDirectExecutorService(),
+                Lower.LowerOptions.builder()
+                    .emitPrivateFields(true)
+                    .emitAllPrivateMemberClasses(false)
+                    .build(),
+                bound.units(),
+                bound.modules(),
+                bound.classPathEnv())
+            .bytes();
+    List<String> fields = new ArrayList<>();
+    new ClassReader(lowered.get("Test"))
+        .accept(
+            new ClassVisitor(Opcodes.ASM9) {
+              @Override
+              public FieldVisitor visitField(
+                  int access, String name, String descriptor, String signature, Object value) {
+                fields.add(name);
+                return null;
+              }
+            },
+            0);
+    assertThat(fields).containsExactly("x");
+    // We would normally omit Test$Inner because it is a private member class and we have
+    // emitAllPrivateMemberClasses(false). But it is referenced as the type of a private field, and
+    // we have emitPrivateFields(true), so it should be included.
+    assertThat(lowered.keySet()).containsExactly("Test", "Test$Inner");
+  }
+
+  @Test
+  public void emitAllPrivateMemberClasses() throws Exception {
+    BindingResult bound =
+        Binder.bind(
+            newDirectExecutorService(),
+            ImmutableList.of(
+                Parser.parse(
+                    """
+                    class Test {
+                      private static class Inner {}
+                    }
+                    """)),
+            ClassPathBinder.bindClasspath(ImmutableList.of()),
+            TURBINE_BOOTCLASSPATH,
+            /* moduleVersion= */ Optional.empty());
+    ImmutableMap<String, byte[]> lowered =
+        Lower.lowerAll(
+                newDirectExecutorService(),
+                Lower.LowerOptions.builder().emitAllPrivateMemberClasses(true).build(),
+                bound.units(),
+                bound.modules(),
+                bound.classPathEnv())
+            .bytes();
+    assertThat(lowered.keySet()).containsExactly("Test", "Test$Inner");
+  }
+
+  @Test
+  public void noemitAllPrivateMemberClasses() throws Exception {
+    BindingResult bound =
+        Binder.bind(
+            newDirectExecutorService(),
+            ImmutableList.of(
+                Parser.parse(
+                    """
+                    class Test {
+                      private static class Inner {}
+                    }
+                    """)),
+            ClassPathBinder.bindClasspath(ImmutableList.of()),
+            TURBINE_BOOTCLASSPATH,
+            /* moduleVersion= */ Optional.empty());
+    ImmutableMap<String, byte[]> lowered =
+        Lower.lowerAll(
+                newDirectExecutorService(),
+                Lower.LowerOptions.createDefault(),
+                bound.units(),
+                bound.modules(),
+                bound.classPathEnv())
+            .bytes();
+    assertThat(lowered.keySet()).containsExactly("Test");
+  }
+
+  @Test
+  public void repeatedTypeAnnotationError() throws Exception {
+    BindingResult bound =
+        Binder.bind(
+            newDirectExecutorService(),
+            ImmutableList.of(
+                Parser.parse(
+                    new SourceFile(
+                        "Test.java",
+                        """
+                        import java.lang.annotation.ElementType;
+                        import java.lang.annotation.Target;
+                        import java.util.List;
+                        @Target({ElementType.TYPE_USE}) @interface Anno {}
+                        class Test {
+                          List<@Anno @Anno Integer> xs;
+                          }
+                        """))),
+            ClassPathBinder.bindClasspath(ImmutableList.of()),
+            TURBINE_BOOTCLASSPATH,
+            /* moduleVersion= */ Optional.empty());
+    TurbineError turbineError =
+        assertThrows(
+            TurbineError.class,
+            () ->
+                Lower.lowerAll(
+                    newDirectExecutorService(),
+                    Lower.LowerOptions.createDefault(),
+                    bound.units(),
+                    bound.modules(),
+                    bound.classPathEnv()));
+    assertThat(turbineError)
+        .hasMessageThat()
+        .isEqualTo(
+            lines(
+                "Test.java:6: error: Anno is not @Repeatable",
+                "  List<@Anno @Anno Integer> xs;",
+                "       ^"));
+  }
+
+  @Test
+  public void methodParameters() throws Exception {
+    BindingResult bound =
+        Binder.bind(
+            newDirectExecutorService(),
+            ImmutableList.of(
+                Parser.parse(
+                    "class Test {\n" //
+                        + "  void f(int x, int y) {}\n"
+                        + "}")),
+            ClassPathBinder.bindClasspath(ImmutableList.of()),
+            TURBINE_BOOTCLASSPATH,
+            /* moduleVersion= */ Optional.empty());
+    ImmutableMap<String, byte[]> lowered =
+        Lower.lowerAll(
+                newDirectExecutorService(),
+                Lower.LowerOptions.createDefault(),
+                bound.units(),
+                bound.modules(),
+                bound.classPathEnv())
+            .bytes();
+    Map<String, Map<String, Integer>> methodParameters = new HashMap<>();
+    new ClassReader(lowered.get("Test"))
+        .accept(
+            new ClassVisitor(Opcodes.ASM9) {
+              @Override
+              public MethodVisitor visitMethod(
+                  int access,
+                  String methodName,
+                  String descriptor,
+                  String signature,
+                  String[] exceptions) {
+                return new MethodVisitor(Opcodes.ASM9) {
+                  @Override
+                  public void visitParameter(String name, int access) {
+                    methodParameters
+                        .computeIfAbsent(methodName, k -> new HashMap<>())
+                        .put(name, access);
+                  }
+                };
+              }
+            },
+            0);
+    assertThat(methodParameters.get("f")).containsExactly("x", 0, "y", 0);
+  }
+
+  @Test
+  public void noMethodParameters() throws Exception {
+    BindingResult bound =
+        Binder.bind(
+            newDirectExecutorService(),
+            ImmutableList.of(
+                Parser.parse(
+                    "class Test {\n" //
+                        + "  void f(int x, int y) {}\n"
+                        + "}")),
+            ClassPathBinder.bindClasspath(ImmutableList.of()),
+            TURBINE_BOOTCLASSPATH,
+            /* moduleVersion= */ Optional.empty());
+    ImmutableMap<String, byte[]> lowered =
+        Lower.lowerAll(
+                newDirectExecutorService(),
+                Lower.LowerOptions.builder().methodParameters(false).build(),
+                bound.units(),
+                bound.modules(),
+                bound.classPathEnv())
+            .bytes();
+    Map<String, Map<String, Integer>> methodParameters = new HashMap<>();
+    new ClassReader(lowered.get("Test"))
+        .accept(
+            new ClassVisitor(Opcodes.ASM9) {
+              @Override
+              public MethodVisitor visitMethod(
+                  int access,
+                  String methodName,
+                  String descriptor,
+                  String signature,
+                  String[] exceptions) {
+                return new MethodVisitor(Opcodes.ASM9) {
+                  @Override
+                  public void visitParameter(String name, int access) {
+                    methodParameters
+                        .computeIfAbsent(methodName, k -> new HashMap<>())
+                        .put(name, access);
+                  }
+                };
+              }
+            },
+            0);
+    assertThat(methodParameters).isEmpty();
+  }
+
+  @Test
+  public void sourceRetentionAnnotationFromClassPath() throws Exception {
+    Map<String, byte[]> classpath =
+        IntegrationTestSupport.runJavac(
+            ImmutableMap.of(
+                "Anno.java",
+                """
+                import java.lang.annotation.Retention;
+                import java.lang.annotation.RetentionPolicy;
+                @Retention(RetentionPolicy.SOURCE)
+                public @interface Anno {
+                  Class<?> value();
+                }
+                """),
+            ImmutableList.of());
+    Path lib = temporaryFolder.newFile("lib.jar").toPath();
+    try (JarOutputStream jos = new JarOutputStream(Files.newOutputStream(lib))) {
+      for (String name : classpath.keySet()) {
+        write(jos, classpath, name);
+      }
+    }
+    ImmutableMap<String, String> sources =
+        ImmutableMap.of(
+            "Test.java",
+            """
+            class Test {
+              private static class A {}
+              @Anno(A.class) public int x;
+            }
+            """);
+    Map<String, byte[]> lowered = IntegrationTestSupport.runTurbine(sources, ImmutableList.of(lib));
+    assertThat(lowered.keySet()).containsExactly("Test");
+  }
+
+  @Test
+  public void privateSealedClass() throws Exception {
+    BindingResult bound =
+        Binder.bind(
+            newDirectExecutorService(),
+            ImmutableList.of(
+                Parser.parse(
+                    """
+                    public class Test {
+                      public sealed interface S permits A, B {}
+                      private static final class A extends Test {}
+                      private static final class B extends Test {}
+                    }
+                    """)),
+            ClassPathBinder.bindClasspath(ImmutableList.of()),
+            TURBINE_BOOTCLASSPATH,
+            /* moduleVersion= */ Optional.empty());
+    ImmutableMap<String, byte[]> lowered =
+        Lower.lowerAll(
+                newDirectExecutorService(),
+                Lower.LowerOptions.createDefault(),
+                bound.units(),
+                bound.modules(),
+                bound.classPathEnv())
+            .bytes();
+    assertThat(lowered.keySet()).containsExactly("Test", "Test$S", "Test$B", "Test$A");
+
+    List<String> permitted = new ArrayList<>();
+    new ClassReader(lowered.get("Test$S"))
+        .accept(
+            new ClassVisitor(Opcodes.ASM9) {
+              @Override
+              public void visitPermittedSubclass(String permit) {
+                permitted.add(permit);
+              }
+            },
+            0);
+    assertThat(permitted).containsExactly("Test$B", "Test$A");
+  }
+
+  @Test
+  public void keepPermits() throws Exception {
+    BindingResult bound =
+        Binder.bind(
+            newDirectExecutorService(),
+            ImmutableList.of(
+                Parser.parse(
+                    """
+                    public class Test {
+                      public sealed interface S permits A, B {}
+                      private static final class A extends Test {}
+                      public static final class B extends Test {}
+                    }
+                    """)),
+            ClassPathBinder.bindClasspath(ImmutableList.of()),
+            TURBINE_BOOTCLASSPATH,
+            /* moduleVersion= */ Optional.empty());
+    ImmutableMap<String, byte[]> lowered =
+        Lower.lowerAll(
+                newDirectExecutorService(),
+                Lower.LowerOptions.createDefault(),
+                bound.units(),
+                bound.modules(),
+                bound.classPathEnv())
+            .bytes();
+    assertThat(lowered.keySet()).containsExactly("Test", "Test$S", "Test$B", "Test$A");
+
+    List<String> permitted = new ArrayList<>();
+    new ClassReader(lowered.get("Test$S"))
+        .accept(
+            new ClassVisitor(Opcodes.ASM9) {
+              @Override
+              public void visitPermittedSubclass(String permit) {
+                permitted.add(permit);
+              }
+            },
+            0);
+    assertThat(permitted).containsExactly("Test$B", "Test$A");
+  }
+
+  @Test
+  public void usagesInTopLevelClass() throws Exception {
+    BindingResult bound =
+        Binder.bind(
+            newDirectExecutorService(),
+            ImmutableList.of(
+                Parser.parse(
+                    """
+                    class A {
+                      public B b;
+                      public A.I i;
+                      public static class I {}
+                    }
+                    class B { public A a; }
+                    """)),
+            ClassPathBinder.bindClasspath(ImmutableList.of()),
+            TURBINE_BOOTCLASSPATH,
+            /* moduleVersion= */ Optional.empty());
+
+    ImmutableMap<ClassSymbol, SourceTypeBoundClass> unit =
+        Stream.of("A", "A$I")
+            .map(ClassSymbol::new)
+            .collect(toImmutableMap(sym -> sym, sym -> bound.units().get(sym)));
+    ImmutableSet<ClassSymbol> usages =
+        RemovePrivateMembers.usagesInTopLevelClass(
+            unit.get(new ClassSymbol("A")),
+            CompoundEnv.<ClassSymbol, TypeBoundClass>of(bound.classPathEnv())
+                .append(new SimpleEnv<>(bound.units())),
+            unit,
+            Lower.LowerOptions.createDefault());
+    // The usage graph should only include symbols with the same outermost enclosing class
+    assertThat(usages).containsExactly(new ClassSymbol("A$I"));
   }
 
   static String lines(String... lines) {

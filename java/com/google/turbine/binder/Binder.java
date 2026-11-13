@@ -18,11 +18,11 @@ package com.google.turbine.binder;
 
 import static java.util.Objects.requireNonNull;
 
-import com.google.auto.value.AutoValue;
-import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.turbine.binder.CompUnitPreprocessor.PreprocessedCompUnit;
 import com.google.turbine.binder.Processing.ProcessorInfo;
 import com.google.turbine.binder.Resolve.CanonicalResolver;
@@ -62,13 +62,18 @@ import com.google.turbine.diag.TurbineError.ErrorKind;
 import com.google.turbine.diag.TurbineLog;
 import com.google.turbine.model.Const;
 import com.google.turbine.model.TurbineFlag;
+import com.google.turbine.parallel.Parallel;
 import com.google.turbine.tree.Tree;
 import com.google.turbine.tree.Tree.CompUnit;
 import com.google.turbine.tree.Tree.ModDecl;
 import com.google.turbine.type.Type;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import javax.annotation.processing.Processor;
+import javax.tools.Diagnostic;
 import org.jspecify.annotations.Nullable;
 
 /** The entry point for analysis. */
@@ -76,28 +81,33 @@ public final class Binder {
 
   /** Binds symbols and types to the given compilation units. */
   public static @Nullable BindingResult bind(
+      ListeningExecutorService executor,
       ImmutableList<CompUnit> units,
       ClassPath classpath,
       ClassPath bootclasspath,
       Optional<String> moduleVersion) {
-    return bind(units, classpath, Processing.ProcessorInfo.empty(), bootclasspath, moduleVersion);
+    return bind(
+        executor, units, classpath, Processing.ProcessorInfo.empty(), bootclasspath, moduleVersion);
   }
 
   /** Binds symbols and types to the given compilation units. */
   public static @Nullable BindingResult bind(
+      ListeningExecutorService executor,
       ImmutableList<CompUnit> units,
       ClassPath classpath,
       ProcessorInfo processorInfo,
       ClassPath bootclasspath,
       Optional<String> moduleVersion) {
     TurbineLog log = new TurbineLog();
-    BindingResult br = bind(log, units, classpath, processorInfo, bootclasspath, moduleVersion);
+    BindingResult br =
+        bind(executor, log, units, classpath, processorInfo, bootclasspath, moduleVersion);
     log.maybeThrow();
     return br;
   }
 
   /** Binds symbols and types to the given compilation units. */
   public static @Nullable BindingResult bind(
+      ListeningExecutorService executor,
       TurbineLog log,
       ImmutableList<CompUnit> units,
       ClassPath classpath,
@@ -108,6 +118,7 @@ public final class Binder {
     try {
       br =
           bind(
+              executor,
               log,
               units,
               /* generatedSources= */ ImmutableMap.of(),
@@ -118,7 +129,7 @@ public final class Binder {
       if (!processorInfo.processors().isEmpty() && !units.isEmpty()) {
         br =
             Processing.process(
-                log, units, classpath, processorInfo, bootclasspath, br, moduleVersion);
+                executor, log, units, classpath, processorInfo, bootclasspath, br, moduleVersion);
       }
     } catch (TurbineError turbineError) {
       throw new TurbineError(
@@ -131,6 +142,7 @@ public final class Binder {
   }
 
   static BindingResult bind(
+      ListeningExecutorService executor,
       TurbineLog log,
       ImmutableList<CompUnit> units,
       ImmutableMap<String, SourceFile> generatedSources,
@@ -166,6 +178,7 @@ public final class Binder {
 
     Env<ClassSymbol, SourceTypeBoundClass> tenv =
         bindTypes(
+            executor,
             log,
             syms,
             henv,
@@ -181,10 +194,18 @@ public final class Binder {
             log);
     tenv =
         disambiguateTypeAnnotations(
-            syms, tenv, CompoundEnv.<ClassSymbol, TypeBoundClass>of(classPathEnv).append(tenv));
+            executor,
+            syms,
+            tenv,
+            CompoundEnv.<ClassSymbol, TypeBoundClass>of(classPathEnv).append(tenv),
+            log);
     tenv =
         canonicalizeTypes(
-            syms, tenv, CompoundEnv.<ClassSymbol, TypeBoundClass>of(classPathEnv).append(tenv));
+            executor,
+            syms,
+            tenv,
+            CompoundEnv.<ClassSymbol, TypeBoundClass>of(classPathEnv).append(tenv),
+            log);
 
     ImmutableList<SourceModuleInfo> boundModules =
         bindModules(
@@ -247,17 +268,15 @@ public final class Binder {
 
     SimpleEnv.Builder<ClassSymbol, PackageSourceBoundClass> env = SimpleEnv.builder();
     SimpleEnv.Builder<ModuleSymbol, PackageSourceBoundModule> modules = SimpleEnv.builder();
+    CompoundScope topLevel = CompoundScope.base(tli.scope());
     Scope javaLang = tli.lookupPackage(ImmutableList.of("java", "lang"));
     if (javaLang == null) {
-      // TODO(cushon): add support for diagnostics without a source position, and make this one
-      // of those
-      throw new IllegalArgumentException("Could not find java.lang on bootclasspath");
+      log.add(TurbineDiagnostic.format(Diagnostic.Kind.ERROR, ErrorKind.NO_JAVA_LANG));
+    } else {
+      topLevel = topLevel.append(javaLang);
     }
-    CompoundScope topLevel = CompoundScope.base(tli.scope()).append(javaLang);
     for (PreprocessedCompUnit unit : units) {
-      ImmutableList<String> packagename =
-          ImmutableList.copyOf(Splitter.on('/').omitEmptyStrings().split(unit.packageName()));
-      Scope packageScope = tli.lookupPackage(packagename);
+      Scope packageScope = tli.lookupPackage(unit.packageName());
       CanonicalSymbolResolver importResolver =
           new CanonicalResolver(
               unit.packageName(),
@@ -307,32 +326,52 @@ public final class Binder {
             }
           });
     }
-    return new LazyEnv<>(completers.buildOrThrow(), classPathEnv);
+    LazyEnv<ClassSymbol, HeaderBoundClass, SourceHeaderBoundClass> env =
+        new LazyEnv<>(completers.buildOrThrow(), classPathEnv);
+    // LazyEnv isn't thread-safe, so finish lazy completion here and return a thread-safe SimpleEnv.
+    ImmutableMap.Builder<ClassSymbol, SourceHeaderBoundClass> builder = ImmutableMap.builder();
+    for (ClassSymbol sym : syms) {
+      builder.put(sym, env.getNonNull(sym));
+    }
+    return new SimpleEnv<>(builder.buildOrThrow());
   }
 
   private static Env<ClassSymbol, SourceTypeBoundClass> bindTypes(
+      ListeningExecutorService executor,
       TurbineLog log,
       ImmutableSet<ClassSymbol> syms,
       Env<ClassSymbol, SourceHeaderBoundClass> shenv,
       Env<ClassSymbol, HeaderBoundClass> henv) {
-    SimpleEnv.Builder<ClassSymbol, SourceTypeBoundClass> builder = SimpleEnv.builder();
+    List<ListenableFuture<Map.Entry<ClassSymbol, SourceTypeBoundClass>>> futures =
+        new ArrayList<>();
     for (ClassSymbol sym : syms) {
       SourceHeaderBoundClass base = shenv.getNonNull(sym);
-      builder.put(sym, TypeBinder.bind(log.withSource(base.source()), henv, sym, base));
+      futures.add(
+          executor.submit(
+              () ->
+                  Map.entry(sym, TypeBinder.bind(log.withSource(base.source()), henv, sym, base))));
     }
-    return builder.build();
+    return new SimpleEnv<>(Parallel.allAsMap(futures));
   }
 
   private static Env<ClassSymbol, SourceTypeBoundClass> canonicalizeTypes(
+      ListeningExecutorService executor,
       ImmutableSet<ClassSymbol> syms,
       Env<ClassSymbol, SourceTypeBoundClass> stenv,
-      Env<ClassSymbol, TypeBoundClass> tenv) {
-    SimpleEnv.Builder<ClassSymbol, SourceTypeBoundClass> builder = SimpleEnv.builder();
+      Env<ClassSymbol, TypeBoundClass> tenv,
+      TurbineLog log) {
+    List<ListenableFuture<Map.Entry<ClassSymbol, SourceTypeBoundClass>>> futures =
+        new ArrayList<>();
     for (ClassSymbol sym : syms) {
       SourceTypeBoundClass base = stenv.getNonNull(sym);
-      builder.put(sym, CanonicalTypeBinder.bind(sym, base, tenv));
+      futures.add(
+          executor.submit(
+              () ->
+                  Map.entry(
+                      sym,
+                      CanonicalTypeBinder.bind(log.withSource(base.source()), sym, base, tenv))));
     }
-    return builder.build();
+    return new SimpleEnv<>(Parallel.allAsMap(futures));
   }
 
   private static ImmutableList<SourceModuleInfo> bindModules(
@@ -390,32 +429,7 @@ public final class Binder {
         if (!isConst(field)) {
           continue;
         }
-        completers.put(
-            field.sym(),
-            new LazyEnv.Completer<FieldSymbol, Const.Value, Const.Value>() {
-              @Override
-              public Const.@Nullable Value complete(
-                  Env<FieldSymbol, Const.Value> env1, FieldSymbol k) {
-                try {
-                  return new ConstEvaluator(
-                          sym,
-                          sym,
-                          info.memberImports(),
-                          info.source(),
-                          info.scope(),
-                          env1,
-                          baseEnv,
-                          log.withSource(info.source()))
-                      .evalFieldInitializer(
-                          // we're processing fields bound from sources in the compilation
-                          requireNonNull(field.decl()).init().get(), field.type());
-                } catch (LazyEnv.LazyBindingError e) {
-                  // fields initializers are allowed to reference the field being initialized,
-                  // but if they do they aren't constants
-                  return null;
-                }
-              }
-            });
+        completers.put(field.sym(), new LazyConstCompleter(sym, info, baseEnv, field, log));
       }
     }
 
@@ -433,6 +447,60 @@ public final class Binder {
           sym, new ConstBinder(constenv, sym, baseEnv, base, log.withSource(base.source())).bind());
     }
     return builder.build();
+  }
+
+  private static class LazyConstCompleter
+      implements LazyEnv.Completer<FieldSymbol, Const.Value, Const.Value> {
+    private final ClassSymbol sym;
+    private final SourceTypeBoundClass info;
+    private final CompoundEnv<ClassSymbol, TypeBoundClass> baseEnv;
+    private final FieldInfo field;
+    private final TurbineLog log;
+
+    LazyConstCompleter(
+        ClassSymbol sym,
+        SourceTypeBoundClass info,
+        CompoundEnv<ClassSymbol, TypeBoundClass> baseEnv,
+        FieldInfo field,
+        TurbineLog log) {
+      this.sym = sym;
+      this.info = info;
+      this.baseEnv = baseEnv;
+      this.field = field;
+      this.log = log;
+    }
+
+    @Override
+    public Const.@Nullable Value complete(Env<FieldSymbol, Const.Value> env, FieldSymbol k) {
+      TurbineLog fieldBinderLog = new TurbineLog();
+      Const.Value value;
+      try {
+        value =
+            new ConstEvaluator(
+                    sym,
+                    sym,
+                    info.memberImports(),
+                    info.source(),
+                    info.scope(),
+                    env,
+                    baseEnv,
+                    fieldBinderLog.withSource(info.source()))
+                .evalFieldInitializer(
+                    // we're processing fields bound from sources in the compilation
+                    requireNonNull(field.decl()).init().get(), field.type());
+      } catch (LazyEnv.LazyBindingError e) {
+        // fields initializers are allowed to reference the field being initialized,
+        // but if they do they aren't constants
+        return null;
+      }
+      // assume any fields that couldn't be resolved weren't constants
+      for (TurbineDiagnostic diagnostic : fieldBinderLog.diagnostics()) {
+        if (!diagnostic.kind().equals(ErrorKind.CANNOT_RESOLVE_FIELD)) {
+          log.add(diagnostic);
+        }
+      }
+      return value;
+    }
   }
 
   static boolean isConst(FieldInfo field) {
@@ -453,7 +521,7 @@ public final class Binder {
         if (((Type.ClassTy) field.type()).sym().equals(ClassSymbol.STRING)) {
           break;
         }
-        // fall through
+      // fall through
       default:
         return false;
     }
@@ -465,36 +533,37 @@ public final class Binder {
    * type annotations.
    */
   private static Env<ClassSymbol, SourceTypeBoundClass> disambiguateTypeAnnotations(
+      ListeningExecutorService executor,
       ImmutableSet<ClassSymbol> syms,
       Env<ClassSymbol, SourceTypeBoundClass> stenv,
-      Env<ClassSymbol, TypeBoundClass> tenv) {
-    SimpleEnv.Builder<ClassSymbol, SourceTypeBoundClass> builder = SimpleEnv.builder();
+      Env<ClassSymbol, TypeBoundClass> tenv,
+      TurbineLog log) {
+    List<ListenableFuture<Map.Entry<ClassSymbol, SourceTypeBoundClass>>> futures =
+        new ArrayList<>();
     for (ClassSymbol sym : syms) {
       SourceTypeBoundClass base = stenv.getNonNull(sym);
-      builder.put(sym, DisambiguateTypeAnnotations.bind(base, tenv));
+      futures.add(
+          executor.submit(() -> Map.entry(sym, DisambiguateTypeAnnotations.bind(base, tenv, log))));
     }
-    return builder.build();
+    return new SimpleEnv<>(Parallel.allAsMap(futures));
   }
 
-  /** Statistics about annotation processing. */
-  @AutoValue
-  public abstract static class Statistics {
-
-    /**
-     * The total elapsed time spent in {@link Processor#init} and {@link Processor#process} across
-     * all rounds for each annotation processor.
-     */
-    public abstract ImmutableMap<String, Duration> processingTime();
-
-    /**
-     * Serialized protos containing processor-specific metrics. Currently only supported for Dagger.
-     */
-    public abstract ImmutableMap<String, byte[]> processorMetrics();
+  /**
+   * Statistics about annotation processing.
+   *
+   * @param processingTime The total elapsed time spent in {@link Processor#init} and {@link
+   *     Processor#process} across all rounds for each annotation processor.
+   * @param processorMetrics Serialized protos containing processor-specific metrics. Currently only
+   *     supported for Dagger.
+   */
+  public record Statistics(
+      ImmutableMap<String, Duration> processingTime,
+      ImmutableMap<String, byte[]> processorMetrics) {
 
     public static Statistics create(
         ImmutableMap<String, Duration> processingTime,
         ImmutableMap<String, byte[]> processorMetrics) {
-      return new AutoValue_Binder_Statistics(processingTime, processorMetrics);
+      return new Statistics(processingTime, processorMetrics);
     }
 
     public static Statistics empty() {

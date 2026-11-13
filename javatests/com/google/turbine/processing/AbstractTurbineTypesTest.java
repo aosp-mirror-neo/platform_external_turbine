@@ -20,6 +20,7 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
+import static com.google.common.util.concurrent.MoreExecutors.newDirectExecutorService;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.joining;
@@ -129,9 +130,9 @@ class AbstractTurbineTypesTest {
               Lists.cartesianProduct(bx, bx).stream(),
               (a, b) ->
                   new Object[] {
-                    a.get(0) + " " + a.get(1),
-                    new TypesBiFunctionInput(typeParameters.javacTypes, a.get(0), a.get(1)),
-                    new TypesBiFunctionInput(typeParameters.turbineTypes, b.get(0), b.get(1)),
+                    a.getFirst() + " " + a.get(1),
+                    new TypesBiFunctionInput(typeParameters.javacTypes, a.getFirst(), a.get(1)),
+                    new TypesBiFunctionInput(typeParameters.turbineTypes, b.getFirst(), b.get(1)),
                   })
           .forEachOrdered(params::add);
     }
@@ -402,6 +403,7 @@ class AbstractTurbineTypesTest {
     ImmutableList<CompUnit> units = files.stream().map(Parser::parse).collect(toImmutableList());
     BindingResult bound =
         Binder.bind(
+            newDirectExecutorService(),
             units,
             ClassPathBinder.bindClasspath(ImmutableList.of()),
             TestClassPaths.TURBINE_BOOTCLASSPATH,
@@ -409,7 +411,7 @@ class AbstractTurbineTypesTest {
     Env<ClassSymbol, TypeBoundClass> env =
         CompoundEnv.<ClassSymbol, TypeBoundClass>of(bound.classPathEnv())
             .append(new SimpleEnv<>(bound.units()));
-    ModelFactory factory = new ModelFactory(env, ClassLoader.getSystemClassLoader(), bound.tli());
+    ModelFactory factory = new ModelFactory(env, bound.tli());
     Types turbineTypes = new TurbineTypes(factory);
     ImmutableMap<String, Element> turbineElements =
         bound.units().keySet().stream()

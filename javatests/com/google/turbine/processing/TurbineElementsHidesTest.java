@@ -18,6 +18,7 @@ package com.google.turbine.processing;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.truth.Truth.assertThat;
+import static com.google.common.util.concurrent.MoreExecutors.newDirectExecutorService;
 import static java.util.Arrays.stream;
 import static org.junit.Assert.fail;
 
@@ -232,6 +233,7 @@ public class TurbineElementsHidesTest {
             .collect(toImmutableList());
     Binder.BindingResult bound =
         Binder.bind(
+            newDirectExecutorService(),
             units,
             ClassPathBinder.bindClasspath(ImmutableList.of()),
             TestClassPaths.TURBINE_BOOTCLASSPATH,
@@ -239,7 +241,7 @@ public class TurbineElementsHidesTest {
     Env<ClassSymbol, TypeBoundClass> env =
         CompoundEnv.<ClassSymbol, TypeBoundClass>of(bound.classPathEnv())
             .append(new SimpleEnv<>(bound.units()));
-    ModelFactory factory = new ModelFactory(env, ClassLoader.getSystemClassLoader(), bound.tli());
+    ModelFactory factory = new ModelFactory(env, bound.tli());
     TurbineTypes turbineTypes = new TurbineTypes(factory);
     TurbineElements elements = new TurbineElements(factory, turbineTypes);
     ImmutableList<TurbineTypeElement> typeElements =

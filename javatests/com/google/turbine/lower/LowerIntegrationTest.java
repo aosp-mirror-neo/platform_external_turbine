@@ -33,7 +33,6 @@ import java.io.IOError;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -56,6 +55,7 @@ public class LowerIntegrationTest {
   private static final ImmutableMap<String, Integer> SOURCE_VERSION =
       ImmutableMap.ofEntries(
           entry("record.test", 16),
+          entry("record_fields.test", 16),
           entry("record2.test", 16),
           entry("record_tostring.test", 16),
           entry("record_ctor.test", 16),
@@ -266,6 +266,7 @@ public class LowerIntegrationTest {
       "non_const.test",
       "noncanon.test",
       "noncanon_static_wild.test",
+      "nonconst_array_cast.test",
       "nonconst_unary_expression.test",
       "one.test",
       "outer.test",
@@ -277,9 +278,11 @@ public class LowerIntegrationTest {
       "permits.test",
       "prim_class.test",
       "private_member.test",
+      "private_pruned.test",
       "privateinner.test",
       "proto.test",
       "proto2.test",
+      "pruned_annotation.test",
       "qual.test",
       "raw.test",
       "raw2.test",
@@ -290,6 +293,7 @@ public class LowerIntegrationTest {
       "record.test",
       "record2.test",
       "record_ctor.test",
+      "record_fields.test",
       "record_getter_override.test",
       "record_tostring.test",
       "rek.test",
@@ -375,7 +379,7 @@ public class LowerIntegrationTest {
     String shardFile = System.getenv("TEST_SHARD_STATUS_FILE");
     if (shardFile != null) {
       try {
-        Files.write(Paths.get(shardFile), new byte[0]);
+        Files.write(Path.of(shardFile), new byte[0]);
       } catch (IOException e) {
         throw new IOError(e);
       }
@@ -421,11 +425,15 @@ public class LowerIntegrationTest {
       requiredVersion = actualVersion;
       javacoptsBuilder.add("--enable-preview");
     }
-    javacoptsBuilder.add(
-        "-source", String.valueOf(requiredVersion), "-target", String.valueOf(requiredVersion));
-    javacoptsBuilder.add("-Xpkginfo:always");
-
-    ImmutableList<String> javacopts = javacoptsBuilder.build();
+    ImmutableList<String> javacopts =
+        javacoptsBuilder
+            .add(
+                "-source",
+                String.valueOf(requiredVersion),
+                "-target",
+                String.valueOf(requiredVersion))
+            .add("-Xpkginfo:always")
+            .build();
 
     Map<String, byte[]> expected =
         IntegrationTestSupport.runJavac(input.sources, classpathJar, javacopts);
@@ -440,7 +448,7 @@ public class LowerIntegrationTest {
     actual.forEach(
         (name, bytes) -> {
           ClassFile classFile = ClassReader.read(name, bytes);
-          bytecode.put(name, ClassWriter.writeClass(classFile));
+          bytecode.put(name + ".class", ClassWriter.writeClass(classFile));
         });
 
     assertThat(IntegrationTestSupport.dump(bytecode))

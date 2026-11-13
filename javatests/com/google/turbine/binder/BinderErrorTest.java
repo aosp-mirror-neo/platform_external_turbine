@@ -17,6 +17,7 @@
 package com.google.turbine.binder;
 
 import static com.google.common.truth.Truth.assertThat;
+import static com.google.common.util.concurrent.MoreExecutors.newDirectExecutorService;
 import static com.google.turbine.testing.TestClassPaths.TURBINE_BOOTCLASSPATH;
 import static org.junit.Assert.assertThrows;
 
@@ -322,6 +323,9 @@ public class BinderErrorTest {
           "<>:5: error: could not resolve field NO_SUCH", //
           "  @Anno(value=Test.NO_SUCH) int x;",
           "              ^",
+          "<>:5: error: could not evaluate constant expression",
+          "  @Anno(value=Test.NO_SUCH) int x;",
+          "              ^",
         },
       },
       {
@@ -404,6 +408,9 @@ public class BinderErrorTest {
           "<>:5: error: could not resolve field Entry", //
           "  @Anno(value={java.util.Map.Entry}) int x;",
           "               ^",
+          "<>:5: error: could not evaluate constant expression",
+          "  @Anno(value={java.util.Map.Entry}) int x;",
+          "              ^",
         },
       },
       {
@@ -419,6 +426,9 @@ public class BinderErrorTest {
           "<>:5: error: could not resolve field Object", //
           "  @Anno(value={java.lang.Object}) int x;",
           "               ^",
+          "<>:5: error: could not evaluate constant expression",
+          "  @Anno(value={java.lang.Object}) int x;",
+          "              ^",
         },
       },
       {
@@ -534,6 +544,9 @@ public class BinderErrorTest {
           "<>:4: error: could not resolve RUNTIME",
           "@Retention(@RetentionPolicy.RUNTIME)",
           "                            ^",
+          "<>:4: error: could not evaluate constant expression",
+          "@Retention(@RetentionPolicy.RUNTIME)",
+          "            ^",
         },
       },
       {
@@ -587,6 +600,9 @@ public class BinderErrorTest {
           "<>:7: error: could not resolve NoSuch", //
           "@One.A(b = {@One.NoSuch})",
           "                 ^",
+          "<>:7: error: could not evaluate constant expression",
+          "@One.A(b = {@One.NoSuch})",
+          "           ^",
         },
       },
       {
@@ -697,7 +713,7 @@ public class BinderErrorTest {
           "<>:1: error: cycle in class hierarchy: T",
           "class T implements T {}",
           "                   ^",
-          "<>:1: error: expected interface type",
+          "<>:1: error: expected interface type: T",
           "class T implements T {}",
           "                   ^",
         },
@@ -984,13 +1000,13 @@ public class BinderErrorTest {
           "interface B extends C {}",
         },
         {
-          "<>:3: error: unexpected interface type",
+          "<>:3: error: unexpected interface type: I",
           "class A extends I implements C {}",
           "                ^",
-          "<>:3: error: expected interface type",
+          "<>:3: error: expected interface type: C",
           "class A extends I implements C {}",
           "                             ^",
-          "<>:4: error: expected interface type",
+          "<>:4: error: expected interface type: C",
           "interface B extends C {}",
           "                    ^",
         },
@@ -1024,6 +1040,66 @@ public class BinderErrorTest {
           "                                      ^",
         },
       },
+      {
+        {
+          "@interface Anno {}", //
+          "class Test {",
+          "  @Anno @Anno int x;",
+          "  @Anno @Anno int y;",
+          "}",
+        },
+        {
+          "<>:3: error: Anno is not @Repeatable",
+          "  @Anno @Anno int x;",
+          "  ^",
+          "<>:4: error: Anno is not @Repeatable",
+          "  @Anno @Anno int y;",
+          "  ^",
+        },
+      },
+      {
+        {
+          "class B<X, Y> {",
+          "  class J<A, B> {}",
+          "}",
+          "class A<T> extends B<T> {",
+          "  class I<X> extends J<X> {}",
+          "}",
+          "class Test {",
+          "  A<String>.J<String, Integer> a;",
+          "}",
+        },
+        // The diagnostic positions here are at locations where a type is being canonicalized,
+        // and a referenced type has a mismatch between the actual and expected type arguments.
+        // It would be clearer to report this at the type declaration instead of the type use,
+        // but then we'd have to unconditionally validate all declarations instead of just noticing
+        // the errors that affect canonicalization. So we do less work and produce slightly worse
+        // diagnostics. Hopefully including the type name in the diagnostic is clear enough. This
+        // could be revisited if there are reports that these diagnostics are confusing.
+        {
+          "<>:5: error: expected 2 type arguments for B, got 1",
+          "  class I<X> extends J<X> {}",
+          "        ^",
+          "<>:8: error: expected 2 type arguments for B, got 1",
+          "  A<String>.J<String, Integer> a;",
+          "                               ^",
+        },
+      },
+      {
+        {
+          "@interface Anno { NoSuch foo() default 0; }", //
+          "@Anno(42)",
+          "class T {}",
+        },
+        {
+          "<>:1: error: could not resolve NoSuch",
+          "@interface Anno { NoSuch foo() default 0; }",
+          "                  ^",
+          "<>:2: error: could not resolve element value() in Anno",
+          "@Anno(42)",
+          "      ^",
+        }
+      },
     };
     return Arrays.asList((Object[][]) testCases);
   }
@@ -1044,6 +1120,7 @@ public class BinderErrorTest {
             TurbineError.class,
             () ->
                 Binder.bind(
+                        newDirectExecutorService(),
                         ImmutableList.of(parseLines(source)),
                         ClassPathBinder.bindClasspath(ImmutableList.of()),
                         TURBINE_BOOTCLASSPATH,
@@ -1075,6 +1152,7 @@ public class BinderErrorTest {
             TurbineError.class,
             () ->
                 Binder.bind(
+                        newDirectExecutorService(),
                         ImmutableList.of(parseLines(source)),
                         ClassPathBinder.bindClasspath(ImmutableList.of()),
                         ProcessorInfo.create(
@@ -1085,6 +1163,7 @@ public class BinderErrorTest {
                         TURBINE_BOOTCLASSPATH,
                         /* moduleVersion= */ Optional.empty())
                     .units());
+
     assertThat(e).hasMessageThat().isEqualTo(lines(expected));
   }
 

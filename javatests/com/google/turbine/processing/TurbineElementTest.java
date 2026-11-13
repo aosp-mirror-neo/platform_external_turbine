@@ -47,9 +47,7 @@ public class TurbineElementTest {
 
   private final ModelFactory factory =
       new ModelFactory(
-          TestClassPaths.TURBINE_BOOTCLASSPATH.env(),
-          ClassLoader.getSystemClassLoader(),
-          TestClassPaths.TURBINE_BOOTCLASSPATH.index());
+          TestClassPaths.TURBINE_BOOTCLASSPATH.env(), TestClassPaths.TURBINE_BOOTCLASSPATH.index());
 
   @Test
   public void typeElement() {
@@ -138,10 +136,13 @@ public class TurbineElementTest {
             factory.typeElement(new ClassSymbol("java/util/List")))
         .addEqualityGroup(factory.typeElement(new ClassSymbol("java/util/ArrayList")))
         .addEqualityGroup(
-            factory.typeElement(new ClassSymbol("java/util/Map")).getTypeParameters().get(0),
-            factory.typeElement(new ClassSymbol("java/util/Map")).getTypeParameters().get(0))
+            factory.typeElement(new ClassSymbol("java/util/Map")).getTypeParameters().getFirst(),
+            factory.typeElement(new ClassSymbol("java/util/Map")).getTypeParameters().getFirst())
         .addEqualityGroup(
-            factory.typeElement(new ClassSymbol("java/util/ArrayList")).getTypeParameters().get(0))
+            factory
+                .typeElement(new ClassSymbol("java/util/ArrayList"))
+                .getTypeParameters()
+                .getFirst())
         .addEqualityGroup(
             factory.fieldElement(
                 new FieldSymbol(new ClassSymbol("java/util/ArrayList"), "elementData")),
@@ -164,7 +165,7 @@ public class TurbineElementTest {
                         .findFirst()
                         .get())
                 .getParameters()
-                .get(0))
+                .getFirst())
         .addEqualityGroup(
             factory
                 .typeElement(new ClassSymbol("java/util/ArrayList"))

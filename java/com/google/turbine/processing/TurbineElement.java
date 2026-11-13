@@ -19,17 +19,13 @@ package com.google.turbine.processing;
 import static java.util.Objects.requireNonNull;
 
 import com.google.common.base.Joiner;
-import com.google.common.base.Splitter;
 import com.google.common.base.Supplier;
 import com.google.common.base.Suppliers;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Iterables;
 import com.google.common.collect.Sets;
-import com.google.turbine.binder.bound.AnnotationMetadata;
 import com.google.turbine.binder.bound.SourceTypeBoundClass;
-import com.google.turbine.binder.bound.TurbineAnnotationValue;
 import com.google.turbine.binder.bound.TypeBoundClass;
 import com.google.turbine.binder.bound.TypeBoundClass.FieldInfo;
 import com.google.turbine.binder.bound.TypeBoundClass.MethodInfo;
@@ -47,9 +43,8 @@ import com.google.turbine.binder.sym.Symbol;
 import com.google.turbine.binder.sym.TyVarSymbol;
 import com.google.turbine.diag.TurbineError;
 import com.google.turbine.diag.TurbineError.ErrorKind;
-import com.google.turbine.model.Const;
-import com.google.turbine.model.Const.ArrayInitValue;
 import com.google.turbine.model.TurbineFlag;
+import com.google.turbine.model.TurbineJavadoc;
 import com.google.turbine.tree.Tree.MethDecl;
 import com.google.turbine.tree.Tree.VarDecl;
 import com.google.turbine.type.AnnoInfo;
@@ -59,7 +54,6 @@ import com.google.turbine.type.Type.ClassTy.SimpleClassTy;
 import com.google.turbine.type.Type.ErrorTy;
 import java.lang.annotation.Annotation;
 import java.util.ArrayDeque;
-import java.util.ArrayList;
 import java.util.Deque;
 import java.util.EnumSet;
 import java.util.HashMap;
@@ -91,7 +85,7 @@ public abstract class TurbineElement implements Element {
 
   public abstract Symbol sym();
 
-  public abstract String javadoc();
+  public abstract @Nullable TurbineJavadoc javadoc();
 
   @Override
   public abstract int hashCode();
@@ -110,15 +104,12 @@ public abstract class TurbineElement implements Element {
     this.factory = requireNonNull(factory);
     this.annotationMirrors =
         factory.memoize(
-            new Supplier<ImmutableList<AnnotationMirror>>() {
-              @Override
-              public ImmutableList<AnnotationMirror> get() {
-                ImmutableList.Builder<AnnotationMirror> result = ImmutableList.builder();
-                for (AnnoInfo anno : annos()) {
-                  result.add(TurbineAnnotationMirror.create(factory, anno));
-                }
-                return result.build();
+            () -> {
+              ImmutableList.Builder<AnnotationMirror> result = ImmutableList.builder();
+              for (AnnoInfo anno : annos()) {
+                result.add(TurbineAnnotationMirror.create(factory, anno));
               }
+              return result.build();
             });
   }
 
@@ -133,46 +124,12 @@ public abstract class TurbineElement implements Element {
 
   @Override
   public <A extends Annotation> A getAnnotation(Class<A> annotationType) {
-    ClassSymbol sym = new ClassSymbol(annotationType.getName().replace('.', '/'));
-    TypeBoundClass info = factory.getSymbol(sym);
-    if (info == null) {
-      return null;
-    }
-    AnnoInfo anno = getAnnotation(annos(), sym);
-    if (anno == null) {
-      return null;
-    }
-    return TurbineAnnotationProxy.create(factory, annotationType, anno);
+    return TurbineAnnotationProxy.getAnnotation(factory, annos(), annotationType);
   }
 
   @Override
   public final <A extends Annotation> A[] getAnnotationsByType(Class<A> annotationType) {
-    ClassSymbol sym = new ClassSymbol(annotationType.getName().replace('.', '/'));
-    TypeBoundClass info = factory.getSymbol(sym);
-    if (info == null) {
-      return null;
-    }
-    AnnotationMetadata metadata = info.annotationMetadata();
-    if (metadata == null) {
-      return null;
-    }
-    List<A> result = new ArrayList<>();
-    for (AnnoInfo anno : annos()) {
-      if (anno.sym().equals(sym)) {
-        result.add(TurbineAnnotationProxy.create(factory, annotationType, anno));
-        continue;
-      }
-      if (anno.sym().equals(metadata.repeatable())) {
-        // requireNonNull is safe because java.lang.annotation.Repeatable declares `value`.
-        ArrayInitValue arrayValue = (ArrayInitValue) requireNonNull(anno.values().get("value"));
-        for (Const element : arrayValue.elements()) {
-          result.add(
-              TurbineAnnotationProxy.create(
-                  factory, annotationType, ((TurbineAnnotationValue) element).info()));
-        }
-      }
-    }
-    return Iterables.toArray(result, annotationType);
+    return TurbineAnnotationProxy.getAnnotationsByType(factory, annos(), annotationType);
   }
 
   @Override
@@ -200,14 +157,7 @@ public abstract class TurbineElement implements Element {
     TurbineTypeElement(ModelFactory factory, ClassSymbol sym) {
       super(factory);
       this.sym = requireNonNull(sym);
-      this.info =
-          memoize(
-              new Supplier<TypeBoundClass>() {
-                @Override
-                public TypeBoundClass get() {
-                  return factory.getSymbol(sym);
-                }
-              });
+      this.info = memoize(() -> factory.getSymbol(sym));
     }
 
     @Nullable TypeBoundClass info() {
@@ -256,24 +206,17 @@ public abstract class TurbineElement implements Element {
 
     private final Supplier<TypeMirror> superclass =
         memoize(
-            new Supplier<TypeMirror>() {
-              @Override
-              public TypeMirror get() {
-                TypeBoundClass info = infoNonNull();
-                switch (info.kind()) {
-                  case CLASS:
-                  case ENUM:
-                  case RECORD:
-                    if (info.superClassType() != null) {
-                      return factory.asTypeMirror(info.superClassType());
-                    }
-                    return factory.noType();
-                  case INTERFACE:
-                  case ANNOTATION:
-                    return factory.noType();
+            () -> {
+              TypeBoundClass info = infoNonNull();
+              return switch (info.kind()) {
+                case CLASS, ENUM, RECORD -> {
+                  if (info.superClassType() != null) {
+                    yield factory.asTypeMirror(info.superClassType());
+                  }
+                  yield factory.noType();
                 }
-                throw new AssertionError(info.kind());
-              }
+                case INTERFACE, ANNOTATION -> factory.noType();
+              };
             });
 
     @Override
@@ -287,13 +230,7 @@ public abstract class TurbineElement implements Element {
     }
 
     private final Supplier<List<TypeMirror>> interfaces =
-        memoize(
-            new Supplier<List<TypeMirror>>() {
-              @Override
-              public List<TypeMirror> get() {
-                return factory.asTypeMirrors(infoNonNull().interfaceTypes());
-              }
-            });
+        memoize(() -> factory.asTypeMirrors(infoNonNull().interfaceTypes()));
 
     @Override
     public List<? extends TypeMirror> getInterfaces() {
@@ -302,15 +239,12 @@ public abstract class TurbineElement implements Element {
 
     private final Supplier<ImmutableList<TypeParameterElement>> typeParameters =
         memoize(
-            new Supplier<ImmutableList<TypeParameterElement>>() {
-              @Override
-              public ImmutableList<TypeParameterElement> get() {
-                ImmutableList.Builder<TypeParameterElement> result = ImmutableList.builder();
-                for (TyVarSymbol p : infoNonNull().typeParameters().values()) {
-                  result.add(factory.typeParameterElement(p));
-                }
-                return result.build();
+            () -> {
+              ImmutableList.Builder<TypeParameterElement> result = ImmutableList.builder();
+              for (TyVarSymbol p : infoNonNull().typeParameters().values()) {
+                result.add(factory.typeParameterElement(p));
               }
+              return result.build();
             });
 
     @Override
@@ -329,7 +263,7 @@ public abstract class TurbineElement implements Element {
               Type asGenericType(ClassSymbol symbol) {
                 TypeBoundClass info = info();
                 if (info == null) {
-                  return ErrorTy.create(getQualifiedName().toString(), ImmutableList.of());
+                  return ErrorTy.create(getQualifiedName().toString());
                 }
                 Deque<Type.ClassTy.SimpleClassTy> simples = new ArrayDeque<>();
                 simples.addFirst(simple(symbol, info));
@@ -358,29 +292,14 @@ public abstract class TurbineElement implements Element {
     @Override
     public ElementKind getKind() {
       TypeBoundClass info = infoNonNull();
-      switch (info.kind()) {
-        case CLASS:
-          return ElementKind.CLASS;
-        case INTERFACE:
-          return ElementKind.INTERFACE;
-        case ENUM:
-          return ElementKind.ENUM;
-        case ANNOTATION:
-          return ElementKind.ANNOTATION_TYPE;
-        case RECORD:
-          return RECORD.get();
-      }
-      throw new AssertionError(info.kind());
+      return switch (info.kind()) {
+        case CLASS -> ElementKind.CLASS;
+        case INTERFACE -> ElementKind.INTERFACE;
+        case ENUM -> ElementKind.ENUM;
+        case ANNOTATION -> ElementKind.ANNOTATION_TYPE;
+        case RECORD -> ElementKind.RECORD;
+      };
     }
-
-    private static final Supplier<ElementKind> RECORD =
-        Suppliers.memoize(
-            new Supplier<ElementKind>() {
-              @Override
-              public ElementKind get() {
-                return ElementKind.valueOf("RECORD");
-              }
-            });
 
     @Override
     public Set<Modifier> getModifiers() {
@@ -424,15 +343,12 @@ public abstract class TurbineElement implements Element {
 
     private final Supplier<ImmutableList<TypeMirror>> permits =
         memoize(
-            new Supplier<>() {
-              @Override
-              public ImmutableList<TypeMirror> get() {
-                ImmutableList.Builder<TypeMirror> result = ImmutableList.builder();
-                for (ClassSymbol p : infoNonNull().permits()) {
-                  result.add(factory.asTypeMirror(ClassTy.asNonParametricClassTy(p)));
-                }
-                return result.build();
+            () -> {
+              ImmutableList.Builder<TypeMirror> result = ImmutableList.builder();
+              for (ClassSymbol p : infoNonNull().permits()) {
+                result.add(factory.asTypeMirror(ClassTy.asNonParametricClassTy(p)));
               }
+              return result.build();
             });
 
     @Override
@@ -442,25 +358,22 @@ public abstract class TurbineElement implements Element {
 
     private final Supplier<ImmutableList<Element>> enclosed =
         memoize(
-            new Supplier<ImmutableList<Element>>() {
-              @Override
-              public ImmutableList<Element> get() {
-                TypeBoundClass info = infoNonNull();
-                ImmutableList.Builder<Element> result = ImmutableList.builder();
-                for (RecordComponentInfo component : info.components()) {
-                  result.add(factory.recordComponentElement(component.sym()));
-                }
-                for (FieldInfo field : info.fields()) {
-                  result.add(factory.fieldElement(field.sym()));
-                }
-                for (MethodInfo method : info.methods()) {
-                  result.add(factory.executableElement(method.sym()));
-                }
-                for (ClassSymbol child : info.children().values()) {
-                  result.add(factory.typeElement(child));
-                }
-                return result.build();
+            () -> {
+              TypeBoundClass info = infoNonNull();
+              ImmutableList.Builder<Element> result = ImmutableList.builder();
+              for (RecordComponentInfo component : info.components()) {
+                result.add(factory.recordComponentElement(component.sym()));
               }
+              for (FieldInfo field : info.fields()) {
+                result.add(factory.fieldElement(field.sym()));
+              }
+              for (MethodInfo method : info.methods()) {
+                result.add(factory.executableElement(method.sym()));
+              }
+              for (ClassSymbol child : info.children().values()) {
+                result.add(factory.typeElement(child));
+              }
+              return result.build();
             });
 
     @Override
@@ -479,17 +392,18 @@ public abstract class TurbineElement implements Element {
     }
 
     @Override
-    public String javadoc() {
+    public @Nullable TurbineJavadoc javadoc() {
       TypeBoundClass info = info();
-      if (!(info instanceof SourceTypeBoundClass)) {
+      if (!(info instanceof SourceTypeBoundClass sourceTypeBoundClass)) {
         return null;
       }
-      return ((SourceTypeBoundClass) info).decl().javadoc();
+      return sourceTypeBoundClass.decl().javadoc();
     }
 
     @Override
     public boolean equals(@Nullable Object obj) {
-      return obj instanceof TurbineTypeElement && sym.equals(((TurbineTypeElement) obj).sym);
+      return obj instanceof TurbineTypeElement turbineTypeElement
+          && sym.equals(turbineTypeElement.sym);
     }
 
     @Override
@@ -568,22 +482,19 @@ public abstract class TurbineElement implements Element {
 
     private final Supplier<ImmutableMap<RecordComponentSymbol, MethodSymbol>> recordAccessors =
         memoize(
-            new Supplier<ImmutableMap<RecordComponentSymbol, MethodSymbol>>() {
-              @Override
-              public ImmutableMap<RecordComponentSymbol, MethodSymbol> get() {
-                Map<String, MethodSymbol> methods = new HashMap<>();
-                for (MethodInfo method : info().methods()) {
-                  if (method.parameters().isEmpty()) {
-                    methods.put(method.name(), method.sym());
-                  }
+            () -> {
+              Map<String, MethodSymbol> methods = new HashMap<>();
+              for (MethodInfo method : info().methods()) {
+                if (method.parameters().isEmpty()) {
+                  methods.put(method.name(), method.sym());
                 }
-                ImmutableMap.Builder<RecordComponentSymbol, MethodSymbol> result =
-                    ImmutableMap.builder();
-                for (RecordComponentInfo component : info().components()) {
-                  result.put(component.sym(), methods.get(component.name()));
-                }
-                return result.buildOrThrow();
               }
+              ImmutableMap.Builder<RecordComponentSymbol, MethodSymbol> result =
+                  ImmutableMap.builder();
+              for (RecordComponentInfo component : info().components()) {
+                result.put(component.sym(), methods.get(component.name()));
+              }
+              return result.buildOrThrow();
             });
 
     ExecutableElement recordAccessor(RecordComponentSymbol component) {
@@ -592,15 +503,12 @@ public abstract class TurbineElement implements Element {
 
     private final Supplier<ImmutableList<RecordComponentElement>> recordComponents =
         memoize(
-            new Supplier<ImmutableList<RecordComponentElement>>() {
-              @Override
-              public ImmutableList<RecordComponentElement> get() {
-                ImmutableList.Builder<RecordComponentElement> result = ImmutableList.builder();
-                for (RecordComponentInfo component : info().components()) {
-                  result.add(factory.recordComponentElement(component.sym()));
-                }
-                return result.build();
+            () -> {
+              ImmutableList.Builder<RecordComponentElement> result = ImmutableList.builder();
+              for (RecordComponentInfo component : info().components()) {
+                result.add(factory.recordComponentElement(component.sym()));
               }
+              return result.build();
             });
 
     @Override
@@ -619,8 +527,8 @@ public abstract class TurbineElement implements Element {
 
     @Override
     public boolean equals(@Nullable Object obj) {
-      return obj instanceof TurbineTypeParameterElement
-          && sym.equals(((TurbineTypeParameterElement) obj).sym);
+      return obj instanceof TurbineTypeParameterElement turbineTypeParameterElement
+          && sym.equals(turbineTypeParameterElement.sym);
     }
 
     private final TyVarSymbol sym;
@@ -700,7 +608,7 @@ public abstract class TurbineElement implements Element {
     }
 
     @Override
-    public String javadoc() {
+    public @Nullable TurbineJavadoc javadoc() {
       return null;
     }
 
@@ -739,9 +647,12 @@ public abstract class TurbineElement implements Element {
     }
 
     @Override
-    public String javadoc() {
+    public @Nullable TurbineJavadoc javadoc() {
       MethDecl decl = info().decl();
-      return decl != null ? decl.javadoc() : null;
+      if (decl == null) {
+        return null;
+      }
+      return decl.javadoc();
     }
 
     @Override
@@ -751,8 +662,8 @@ public abstract class TurbineElement implements Element {
 
     @Override
     public boolean equals(@Nullable Object obj) {
-      return obj instanceof TurbineExecutableElement
-          && sym.equals(((TurbineExecutableElement) obj).sym);
+      return obj instanceof TurbineExecutableElement turbineExecutableElement
+          && sym.equals(turbineExecutableElement.sym);
     }
 
     @Override
@@ -771,20 +682,17 @@ public abstract class TurbineElement implements Element {
 
     private final Supplier<ImmutableList<VariableElement>> parameters =
         memoize(
-            new Supplier<ImmutableList<VariableElement>>() {
-              @Override
-              public ImmutableList<VariableElement> get() {
-                ImmutableList.Builder<VariableElement> result = ImmutableList.builder();
-                for (ParamInfo param : info().parameters()) {
-                  if (param.synthetic()) {
-                    // ExecutableElement#getParameters doesn't expect synthetic or mandated
-                    // parameters
-                    continue;
-                  }
-                  result.add(factory.parameterElement(param.sym()));
+            () -> {
+              ImmutableList.Builder<VariableElement> result = ImmutableList.builder();
+              for (ParamInfo param : info().parameters()) {
+                if (param.synthetic()) {
+                  // ExecutableElement#getParameters doesn't expect synthetic or mandated
+                  // parameters
+                  continue;
                 }
-                return result.build();
+                result.add(factory.parameterElement(param.sym()));
               }
+              return result.build();
             });
 
     @Override
@@ -807,13 +715,17 @@ public abstract class TurbineElement implements Element {
         sb.append(info.sym().name());
       }
       sb.append('(');
-      boolean first = true;
-      for (ParamInfo p : info.parameters()) {
-        if (!first) {
+      ImmutableList<ParamInfo> params = info.parameters();
+      for (int i = 0; i < params.size(); i++) {
+        if (i > 0) {
           sb.append(',');
         }
-        sb.append(p.type());
-        first = false;
+        Type t = params.get(i).type();
+        if (i == params.size() - 1 && isVarArgs() && t instanceof Type.ArrayTy arrayTy) {
+          sb.append(arrayTy.elementType()).append("...");
+        } else {
+          sb.append(t);
+        }
       }
       sb.append(')');
       return sb.toString();
@@ -899,7 +811,8 @@ public abstract class TurbineElement implements Element {
 
     @Override
     public boolean equals(@Nullable Object obj) {
-      return obj instanceof TurbineFieldElement && sym.equals(((TurbineFieldElement) obj).sym);
+      return obj instanceof TurbineFieldElement turbineFieldElement
+          && sym.equals(turbineFieldElement.sym);
     }
 
     @Override
@@ -915,9 +828,12 @@ public abstract class TurbineElement implements Element {
     }
 
     @Override
-    public String javadoc() {
+    public @Nullable TurbineJavadoc javadoc() {
       VarDecl decl = info().decl();
-      return decl != null ? decl.javadoc() : null;
+      if (decl == null) {
+        return null;
+      }
+      return decl.javadoc();
     }
 
     private final Supplier<FieldInfo> info =
@@ -1021,12 +937,10 @@ public abstract class TurbineElement implements Element {
     }
     if ((access & TurbineFlag.ACC_TRANSIENT) == TurbineFlag.ACC_TRANSIENT) {
       switch (modifierOwner) {
-        case METHOD:
-        case PARAMETER:
+        case METHOD, PARAMETER -> {
           // varargs and transient use the same bits
-          break;
-        default:
-          modifiers.add(Modifier.TRANSIENT);
+        }
+        default -> modifiers.add(Modifier.TRANSIENT);
       }
     }
     if ((access & TurbineFlag.ACC_VOLATILE) == TurbineFlag.ACC_VOLATILE) {
@@ -1099,7 +1013,7 @@ public abstract class TurbineElement implements Element {
     @Override
     public List<TurbineTypeElement> getEnclosedElements() {
       ImmutableSet.Builder<TurbineTypeElement> result = ImmutableSet.builder();
-      PackageScope scope = factory.tli().lookupPackage(Splitter.on('/').split(sym.binaryName()));
+      PackageScope scope = factory.tli().lookupPackage(sym.binaryName());
       requireNonNull(scope); // the current package exists
       for (ClassSymbol key : scope.classes()) {
         if (key.binaryName().contains("$") && factory.getSymbol(key).owner() != null) {
@@ -1126,8 +1040,12 @@ public abstract class TurbineElement implements Element {
     }
 
     @Override
-    public String javadoc() {
-      return null;
+    public @Nullable TurbineJavadoc javadoc() {
+      TypeBoundClass info = info();
+      if (!(info instanceof SourceTypeBoundClass sourceTypeBoundClass)) {
+        return null;
+      }
+      return sourceTypeBoundClass.decl().javadoc();
     }
 
     @Override
@@ -1137,18 +1055,28 @@ public abstract class TurbineElement implements Element {
 
     @Override
     public boolean equals(@Nullable Object obj) {
-      return obj instanceof TurbinePackageElement && sym.equals(((TurbinePackageElement) obj).sym);
+      return obj instanceof TurbinePackageElement turbinePackageElement
+          && sym.equals(turbinePackageElement.sym);
+    }
+
+    private final Supplier<TypeBoundClass> info =
+        memoize(
+            new Supplier<TypeBoundClass>() {
+              @Override
+              public TypeBoundClass get() {
+                return factory.getSymbol(new ClassSymbol(sym.binaryName() + "/package-info"));
+              }
+            });
+
+    @Nullable TypeBoundClass info() {
+      return info.get();
     }
 
     private final Supplier<ImmutableList<AnnoInfo>> annos =
         memoize(
-            new Supplier<ImmutableList<AnnoInfo>>() {
-              @Override
-              public ImmutableList<AnnoInfo> get() {
-                TypeBoundClass info =
-                    factory.getSymbol(new ClassSymbol(sym.binaryName() + "/package-info"));
-                return info != null ? info.annotations() : ImmutableList.of();
-              }
+            () -> {
+              TypeBoundClass info = info();
+              return info != null ? info.annotations() : ImmutableList.of();
             });
 
     @Override
@@ -1171,7 +1099,7 @@ public abstract class TurbineElement implements Element {
     }
 
     @Override
-    public String javadoc() {
+    public @Nullable TurbineJavadoc javadoc() {
       return null;
     }
 
@@ -1182,8 +1110,8 @@ public abstract class TurbineElement implements Element {
 
     @Override
     public boolean equals(@Nullable Object obj) {
-      return obj instanceof TurbineParameterElement
-          && sym.equals(((TurbineParameterElement) obj).sym);
+      return obj instanceof TurbineParameterElement turbineParameterElement
+          && sym.equals(turbineParameterElement.sym);
     }
 
     private final ParamSymbol sym;
@@ -1211,14 +1139,7 @@ public abstract class TurbineElement implements Element {
       return null;
     }
 
-    private final Supplier<TypeMirror> type =
-        memoize(
-            new Supplier<TypeMirror>() {
-              @Override
-              public TypeMirror get() {
-                return factory.asTypeMirror(info().type());
-              }
-            });
+    private final Supplier<TypeMirror> type = memoize(() -> factory.asTypeMirror(info().type()));
 
     @Override
     public TypeMirror asType() {
@@ -1276,7 +1197,7 @@ public abstract class TurbineElement implements Element {
     }
 
     @Override
-    public String javadoc() {
+    public @Nullable TurbineJavadoc javadoc() {
       return null;
     }
 
@@ -1287,8 +1208,8 @@ public abstract class TurbineElement implements Element {
 
     @Override
     public boolean equals(@Nullable Object obj) {
-      return obj instanceof TurbineRecordComponentElement
-          && sym.equals(((TurbineRecordComponentElement) obj).sym);
+      return obj instanceof TurbineRecordComponentElement turbineRecordComponentElement
+          && sym.equals(turbineRecordComponentElement.sym);
     }
 
     private final RecordComponentSymbol sym;
@@ -1311,14 +1232,7 @@ public abstract class TurbineElement implements Element {
       this.sym = sym;
     }
 
-    private final Supplier<TypeMirror> type =
-        memoize(
-            new Supplier<TypeMirror>() {
-              @Override
-              public TypeMirror get() {
-                return factory.asTypeMirror(info().type());
-              }
-            });
+    private final Supplier<TypeMirror> type = memoize(() -> factory.asTypeMirror(info().type()));
 
     @Override
     public TypeMirror asType() {

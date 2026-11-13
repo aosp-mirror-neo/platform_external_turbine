@@ -96,6 +96,8 @@ public class TurbineElementsTest {
                   "package com.pkg;",
                   "@interface P {}",
                   "=== com/pkg/package-info.java ===",
+                  "/* This is not javadoc. */",
+                  "/** This is package javadoc. */",
                   "@P",
                   "package com.pkg;",
                   "=== Const.java ===",
@@ -136,7 +138,7 @@ public class TurbineElementsTest {
     Env<ClassSymbol, TypeBoundClass> env =
         CompoundEnv.<ClassSymbol, TypeBoundClass>of(bound.classPathEnv())
             .append(new SimpleEnv<>(bound.units()));
-    factory = new ModelFactory(env, TurbineElementsTest.class.getClassLoader(), bound.tli());
+    factory = new ModelFactory(env, bound.tli());
     TurbineTypes turbineTypes = new TurbineTypes(factory);
     turbineElements = new TurbineElements(factory, turbineTypes);
   }
@@ -295,11 +297,14 @@ public class TurbineElementsTest {
     assertThat(e.getSimpleName().toString()).isEqualTo("Foo");
     assertThat(e.getEnclosingElement().toString()).isEqualTo("com.google");
     assertThat(e.getEnclosingElement().getKind()).isEqualTo(ElementKind.PACKAGE);
+    assertThat(turbineElements.getBinaryName((TypeElement) e).toString())
+        .isEqualTo("com.google.Foo");
 
     e = factory.noElement("Foo");
     assertThat(e.getSimpleName().toString()).isEqualTo("Foo");
     assertThat(e.getEnclosingElement().toString()).isEmpty();
     assertThat(e.getEnclosingElement().getKind()).isEqualTo(ElementKind.PACKAGE);
+    assertThat(turbineElements.getBinaryName((TypeElement) e).toString()).isEqualTo("Foo");
   }
 
   @Test
@@ -333,6 +338,9 @@ public class TurbineElementsTest {
                 + "for\n"
                 + "two with extra *\n"
                 + "");
+
+    assertThat(turbineElements.getDocComment(turbineElements.getPackageElement("com.pkg")))
+        .isEqualTo(" This is package javadoc. ");
   }
 
   @Test
